@@ -4,6 +4,7 @@ import { Ellipsis, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
 
 const DEFAULT_TRACK = "│";
 const DEFAULT_THUMB = "█";
+const SGR_RESET = "\x1b[0m";
 
 type ScrollbarMode = "auto" | "always" | "never";
 
@@ -210,7 +211,11 @@ export class ScrollView implements Component {
 			const barGlyph = thumb && row >= thumb.start && row < thumb.end ? this.#thumbChar : this.#trackChar;
 			const styledBar =
 				thumb && row >= thumb.start && row < thumb.end ? this.#theme.thumb(barGlyph) : this.#theme.track(barGlyph);
-			lines.push(`${content}${styledBar}`);
+			// Source lines may end mid-SGR (e.g. an italic thinking block left
+			// unterminated); reset before and after the bar so the glyph keeps its
+			// own shape instead of inheriting italic/slant from the row content
+			// (an italicized "│" renders as a diagonal on mobile terminals).
+			lines.push(`${content}${SGR_RESET}${styledBar}${SGR_RESET}`);
 		}
 		return lines;
 	}

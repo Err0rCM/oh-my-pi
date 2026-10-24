@@ -7,6 +7,10 @@ const theme = {
 	thumb: () => "B",
 };
 
+// The bar glyph is bracketed by SGR resets so an unterminated style from the
+// row content (e.g. an italic thinking block) cannot bleed into the scrollbar.
+const R = "\x1b[0m";
+
 describe("ScrollView", () => {
 	it("renders a fixed-height viewport and omits auto scrollbar when content fits", () => {
 		const view = new ScrollView(["one", "two"], { height: 3, theme });
@@ -17,7 +21,7 @@ describe("ScrollView", () => {
 	it("renders a right-edge scrollbar when content overflows", () => {
 		const view = new ScrollView(["alpha", "beta", "gamma", "delta", "omega"], { height: 3, theme });
 
-		expect(view.render(6)).toEqual(["alphaB", "beta T", "gammaT"]);
+		expect(view.render(6)).toEqual([`alpha${R}B${R}`, `beta ${R}T${R}`, `gamma${R}T${R}`]);
 	});
 
 	it("scrolls and clamps offsets", () => {
@@ -26,7 +30,7 @@ describe("ScrollView", () => {
 		view.scroll(10);
 
 		expect(view.getScrollOffset()).toBe(2);
-		expect(view.render(6)).toEqual(["threeT", "four T", "five B"]);
+		expect(view.render(6)).toEqual([`three${R}T${R}`, `four ${R}T${R}`, `five ${R}B${R}`]);
 
 		view.scroll(-10);
 
@@ -36,7 +40,7 @@ describe("ScrollView", () => {
 	it("reserves a scrollbar column in always mode", () => {
 		const view = new ScrollView(["one"], { height: 2, scrollbar: "always", theme });
 
-		expect(view.render(5)).toEqual(["one B", "    B"]);
+		expect(view.render(5)).toEqual([`one ${R}B${R}`, `    ${R}B${R}`]);
 	});
 
 	it("does not reserve a scrollbar column in never mode", () => {
@@ -49,7 +53,7 @@ describe("ScrollView", () => {
 		const view = new ScrollView(["gamma", "delta"], { height: 2, totalRows: 4, theme });
 		view.setScrollOffset(2);
 
-		expect(view.render(6)).toEqual(["gammaT", "deltaB"]);
+		expect(view.render(6)).toEqual([`gamma${R}T${R}`, `delta${R}B${R}`]);
 	});
 
 	it("does not render a scrollbar when width is zero", () => {
