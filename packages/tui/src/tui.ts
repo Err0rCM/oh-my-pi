@@ -2928,24 +2928,35 @@ export class TUI extends Container {
 
 	/**
 	 * Compose and paint a single fullscreen overlay frame on the alt buffer.
-	 * Cursor markers are stripped (the modal draws its own in-band caret and
-	 * keeps the hardware cursor hidden), and only the modal is composited over a
+	 * Cursor markers are stripped; for modal overlays (which draw their own
+	 * in-band caret) the extracted positions are empty and the hardware cursor
+	 * stays hidden, while an overlay hosting a real focused editor (fullscreen
+	 * chat) gets the hardware cursor parked on the editor caret so it — and the
+	 * IME candidate window — are visible. Only the modal is composited over a
 	 * blank base — the transcript is never touched while the alt buffer is up.
 	 */
 	#renderAltFrame(width: number, height: number): void {
 		const base: string[] = new Array(Math.max(0, height)).fill("");
 		let lines = this.#compositeOverlaysIntoWindow(base, width, height);
-		this.#extractCursorMarkers(lines);
+		const markers = this.#extractCursorMarkers(lines);
 		lines = this.#prepareLinesArray(lines, width);
-		this.#emitAltFrame(lines, width, height);
+		this.#emitAltFrame(lines, width, height, markers);
 	}
 
 	/**
 	 * Full per-row viewport rewrite on the alt buffer. Emits only sync-output
 	 * brackets, a cursor home, and per-row rewrites — never ED3 or any
-	 * native-scrollback byte. The hardware cursor stays hidden here.
+	 * native-scrollback byte. The hardware cursor stays hidden unless the frame
+	 * carries a cursor marker (a focused editor inside e.g. the fullscreen chat
+	 * overlay); then it is parked on that position, inside the sync-output
+	 * bracket so hide→paint→position→show presents as one atomic frame.
 	 */
-	#emitAltFrame(lines: string[], width: number, height: number): void {
+	#emitAltFrame(
+		lines: string[],
+		width: number,
+		height: number,
+		markers?: readonly { row: number; col: number }[],
+	): void {
 		const fitted: string[] = new Array(height);
 		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
@@ -2974,17 +2985,33 @@ export class TUI extends Container {
 					break;
 				}
 			}
-			if (same) return;
+			// Identical pixels can still hide a caret move: the marker is
+			// stripped before the comparison, so "text unchanged, cursor one
+			// glyph over" compares equal. Reposition the cursor alone.
+			if (same) {
+				const parked = this.#altCursorSequence(markers?.[0], width, height);
+				if (parked) this.terminal.write(parked);
+				return;
+			}
 		}
 		let buffer = `${this.#paintBeginSequence}\x1b[H`;
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\r\n";
 			buffer += this.#lineRewriteSequence(fitted[r], width, r, -1, -1, this.#osc66SpacerGlyphWidth(fitted, r));
 		}
+		buffer += this.#altCursorSequence(markers?.[0], width, height);
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#altPreviousLines = fitted;
 		this.#debugPaint = { lines: fitted, windowTop: 0, altScreen: true };
 		this.#fullRedrawCount += 1;
+	}
+
+	/** Sequence parking the hardware cursor on an alt-frame caret marker, or "" to keep it hidden. */
+	#altCursorSequence(marker: { row: number; col: number } | undefined, width: number, height: number): string {
+		if (marker === undefined) return "";
+		const row = Math.max(0, Math.min(marker.row, height - 1));
+		const col = Math.max(0, Math.min(marker.col, width - 1));
+		return `\x1b[${row + 1};${col + 1}H\x1b[?25h`;
 	}
 }
