@@ -23,12 +23,17 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	#viewportHeight = 1;
 	#width = 1;
 	#draggingScrollbar = false;
+	/** Editor rows within the dock, from the last render; undefined when the editor is not laid out. */
+	#editorDockRows: { top: number; count: number } | undefined;
 
 	constructor(
 		private readonly transcriptComponents: readonly Component[],
 		private readonly dockComponents: readonly Component[],
 		private readonly editorContainer: Container,
 		private readonly terminalRows: () => number,
+		private readonly editor?: Component & {
+			moveCursorToRenderedPosition(row: number, col: number, renderWidth: number): boolean;
+		},
 	) {}
 
 	/** Lets the normal editor slot keep keyboard focus while this overlay owns the screen. */
@@ -82,11 +87,33 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	}
 
 	#renderDock(width: number, terminalRows: number): string[] {
-		const lines = this.#renderComponents(this.dockComponents, width);
+		const lines: string[] = [];
+		let editorTop = -1;
+		let editorCount = 0;
+		for (const component of this.dockComponents) {
+			const rendered = component.render(width);
+			if (component === this.editorContainer) {
+				// The editor container renders its children in order; the editor
+				// is the first (and currently only) child, so its rows start at
+				// the container's first row.
+				editorTop = lines.length;
+				editorCount = rendered.length;
+			}
+			lines.push(...rendered);
+		}
 		// Keep one transcript row usable even when a transient panel and a tall
 		// editor would otherwise consume the whole terminal. The tail contains
 		// the editor and footer, which must remain available to type.
-		return lines.length < terminalRows ? lines : lines.slice(lines.length - terminalRows + 1);
+		let dockLines = lines;
+		if (lines.length >= terminalRows) {
+			dockLines = lines.slice(lines.length - terminalRows + 1);
+			if (editorTop >= 0) editorTop -= lines.length - dockLines.length;
+		}
+		this.#editorDockRows =
+			this.editor && editorTop >= 0 && editorTop < dockLines.length
+				? { top: editorTop, count: editorCount }
+				: undefined;
+		return dockLines;
 	}
 
 	#handleViewportKey(data: string): boolean {
@@ -123,6 +150,18 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			// Mouse tracking is enabled for the whole fullscreen surface, so even a
 			// release that did not end a scrollbar drag must stay out of the editor.
 			return true;
+		}
+
+		// Click into the editor's rows: position the caret at the clicked
+		// glyph (click-to-position, CC-style). Runs before generic click
+		// handling so the press never falls through to the scrollbar path.
+		if (event.leftClick && this.editor && this.#editorDockRows !== undefined && event.row >= this.#viewportHeight) {
+			const dockRow = event.row - this.#viewportHeight;
+			if (dockRow >= this.#editorDockRows.top && dockRow < this.#editorDockRows.top + this.#editorDockRows.count) {
+				if (this.editor.moveCursorToRenderedPosition(dockRow - this.#editorDockRows.top, event.col, this.#width)) {
+					return true;
+				}
+			}
 		}
 
 		const scrollbarColumn = this.#width - 1;

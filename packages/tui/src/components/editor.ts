@@ -489,6 +489,9 @@ export class Editor implements Component, Focusable {
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
+	// Decoration rows the last render emitted before the first text row
+	// (top border/chrome), so pointer positions can be mapped back to layout rows.
+	#textRowOffset: number = 0;
 	// Line measurement + word-wrap cache shared by #layoutText,
 	// #buildVisualLineMap, and key handlers within a frame. Line text is a
 	// sound key (strings are immutable); cleared on layout-width or
@@ -1090,6 +1093,7 @@ export class Editor implements Component, Focusable {
 		};
 
 		const topRow = style.renderTop(chromeCtx);
+		this.#textRowOffset = topRow !== undefined ? 1 : 0;
 		if (topRow !== undefined) result.push(topRow);
 
 		// Render each layout line
@@ -1966,6 +1970,49 @@ export class Editor implements Component, Focusable {
 
 	getCursor(): { line: number; col: number } {
 		return { line: this.#state.cursorLine, col: this.#state.cursorCol };
+	}
+
+	/**
+	 * Position the caret from a pointer click on a rendered output row of the
+	 * most recent render at `renderWidth`. `renderedRow` indexes the render()
+	 * output (scrollbar/autocomplete rows included in the numbering, but only
+	 * text rows map); `col` is the 0-based column of the full row, gutter and
+	 * side chrome included. Width-changing decorations (paste-marker expansion)
+	 * are not reversible — the mapping clamps to the underlying layout text, so
+	 * a click on decorated output lands on the nearest caret position.
+	 * Returns true when the click mapped into editor text.
+	 */
+	moveCursorToRenderedPosition(renderedRow: number, col: number, renderWidth: number): boolean {
+		if (renderedRow < 0 || col < 0 || !Number.isFinite(renderedRow) || !Number.isFinite(col)) return false;
+		const paddingX = this.#getEditorPaddingX();
+		const promptGutter = this.#getPromptGutter(renderWidth, paddingX);
+		const chrome = this.#getHorizontalChromeWidth(paddingX);
+		const layoutLines = this.#layoutText(this.#getLayoutWidth(renderWidth, paddingX));
+		const visibleHeight = this.#getVisibleContentHeight(layoutLines.length);
+		const textRow = renderedRow - this.#textRowOffset;
+		if (textRow < 0 || textRow >= visibleHeight) return false; // chrome row, or past the text rows
+		const layout = layoutLines[this.#scrollOffset + textRow];
+		if (!layout) return false;
+		const gutterText =
+			promptGutter === undefined ? "" : textRow === 0 ? promptGutter.firstLine : promptGutter.continuation;
+		const textStartCol = chrome + visibleWidth(gutterText);
+		const textCol = col - textStartCol;
+		if (textCol < 0) return false; // clicked the gutter or side chrome
+		// Invert the column-width mapping: walk the layout text accumulating
+		// cell widths; a click on the left half of a wide glyph stops before it.
+		let acc = 0;
+		let idx = 0;
+		for (const { segment: ch } of segmenter.segment(layout.text)) {
+			const w = visibleWidth(ch) || 1;
+			if (acc + w > textCol) break;
+			acc += w;
+			idx += [...ch].length;
+		}
+		this.#state.cursorLine = layout.sourceLine;
+		this.#setCursorCol(layout.sourceStartCol + idx);
+		this.#updateScrollOffset(this.#getLayoutWidth(renderWidth, paddingX), layoutLines, visibleHeight);
+		this.invalidate();
+		return true;
 	}
 
 	moveToLineStart(): void {
