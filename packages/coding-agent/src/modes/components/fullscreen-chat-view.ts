@@ -10,6 +10,7 @@ import {
 	parseSgrMouse,
 	ScrollView,
 	type SgrMouseEvent,
+	visibleWidth,
 	WheelScrollAccelerator,
 } from "@oh-my-pi/pi-tui";
 
@@ -40,6 +41,10 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	#transcriptLines: readonly string[] = [];
 	/** Scales wheel events by fling speed so touch scrolling keeps up with a flick. */
 	#wheelAccelerator = new WheelScrollAccelerator();
+	/** Transcript length at the last render; growth while scrolled up means new activity. */
+	#lastContentLength = 0;
+	/** True once content grew while the user was scrolled away from the tail. */
+	#hasNewActivity = false;
 
 	constructor(
 		private readonly transcriptComponents: readonly Component[],
@@ -63,7 +68,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		if (mouse) return this.#handleMouse(mouse);
 
 		if (!this.#handleViewportKey(data)) return false;
-		this.#followTail = this.#scrollView.getScrollOffset() === this.#scrollView.getMaxScrollOffset();
+		this.#syncFollowTail();
 		return true;
 	}
 
@@ -102,8 +107,37 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		);
 		if (this.#followTail) this.#scrollView.scrollToBottom();
 
-		const transcriptViewport = this.#scrollView.render(this.#width);
+		if (!this.#followTail && transcriptLines.length > this.#lastContentLength) {
+			this.#hasNewActivity = true;
+		}
+		this.#lastContentLength = transcriptLines.length;
+
+		let transcriptViewport = this.#scrollView.render(this.#width);
+		// The bottom viewport row becomes a jump-to-latest affordance while the
+		// user is scrolled away (upstream Pi) — with a stronger "New activity"
+		// variant once content grew below the fold (Codex).
+		if (this.#hasJumpIndicator() && transcriptViewport.length > 0) {
+			const label = this.#hasNewActivity ? "● New activity · Back to bottom" : "↓ Back to bottom · Ctrl+End";
+			transcriptViewport = [...transcriptViewport.slice(0, -1), this.#renderCentered(label)];
+		}
 		return [...transcriptViewport, ...dockLines];
+	}
+
+	#hasJumpIndicator(): boolean {
+		return !this.#followTail;
+	}
+
+	#renderCentered(label: string): string {
+		const text = ` ${label} `;
+		const padding = Math.max(0, this.#width - visibleWidth(text));
+		const left = Math.floor(padding / 2);
+		return `\x1b[7m${" ".repeat(left)}${text}${" ".repeat(padding - left)}\x1b[0m`;
+	}
+
+	/** Recomputes tail-following from the scroll position; landing on the tail also clears activity. */
+	#syncFollowTail(): void {
+		this.#followTail = this.#scrollView.getScrollOffset() === this.#scrollView.getMaxScrollOffset();
+		if (this.#followTail) this.#hasNewActivity = false;
 	}
 
 	#renderComponents(components: readonly Component[], width: number): string[] {
@@ -178,7 +212,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 				const alt = (event.button & 8) !== 0;
 				this.#scrollView.scroll(event.wheel * lines * (alt ? ALT_WHEEL_SCROLL_MULTIPLIER : 1));
 			}
-			this.#followTail = this.#scrollView.getScrollOffset() === this.#scrollView.getMaxScrollOffset();
+			this.#syncFollowTail();
 			return true;
 		}
 
@@ -210,6 +244,15 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 				this.editor().routeMouse(event, dockRow - this.#editorDockRows.top, event.col);
 				return true;
 			}
+		}
+
+		// Clicking the jump-to-latest indicator row returns to the tail instead
+		// of starting a selection; the indicator only replaces the last viewport
+		// row while the user is scrolled away, so it cannot shadow real content.
+		if (event.leftClick && this.#hasJumpIndicator() && event.row === this.#viewportHeight - 1) {
+			this.#scrollView.scrollToBottom();
+			this.#syncFollowTail();
+			return true;
 		}
 
 		const scrollbarColumn = this.#width - 1;
@@ -273,6 +316,6 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		const denominator = Math.max(1, this.#viewportHeight - 1);
 		const ratio = Math.max(0, Math.min(1, row / denominator));
 		this.#scrollView.setScrollOffset(Math.round(max * ratio));
-		this.#followTail = this.#scrollView.getScrollOffset() === max;
+		this.#syncFollowTail();
 	}
 }

@@ -14,6 +14,18 @@ class LinesComponent implements Component, MouseRoutable {
 	}
 }
 
+/** Mutable transcript stand-in for streaming appends during a test. */
+class GrowableComponent implements Component {
+	lines: string[];
+	constructor(lines: readonly string[]) {
+		this.lines = [...lines];
+	}
+
+	render(): readonly string[] {
+		return this.lines;
+	}
+}
+
 class WrappingComponent implements Component {
 	constructor(private readonly text: string) {}
 
@@ -134,6 +146,48 @@ describe("FullscreenChatView", () => {
 		// wheel-scroll unit tests with an injected clock).
 		expect(view.handleViewportInput("\x1b[<64;5;1M")).toBe(true);
 		expect(view.render(12).length).toBe(6);
+	});
+
+	it("shows a clickable jump-to-latest indicator only while scrolled away", () => {
+		const transcript = new GrowableComponent(Array.from({ length: 10 }, (_, index) => `message-${index + 1}`));
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 6,
+			() => editor,
+			() => {},
+		);
+
+		// Following the tail: no indicator, the last viewport row is content.
+		const following = view.render(12);
+		expect(following[4]).toContain("message-10");
+
+		expect(view.handleViewportInput("\x1b[5~")).toBe(true);
+		const scrolled = view.render(12);
+		expect(scrolled[4]).toContain("Back to bottom");
+		expect(scrolled[4]).not.toContain("message-");
+
+		// Streaming appends while scrolled away switch to the new-activity label.
+		transcript.lines.push("message-11", "message-12");
+		const notified = view.render(12);
+		expect(notified[4]).toContain("New activity");
+		expect(notified[4]).toContain("Back to bottom");
+
+		// Clicking the indicator row returns to the tail, clears the activity
+		// flag, and re-engages follow so later appends stay pinned.
+		expect(view.handleViewportInput("\x1b[<0;2;5M")).toBe(true);
+		const back = view.render(12);
+		expect(back[4]).toContain("message-12");
+		transcript.lines.push("message-13");
+		expect(view.render(12)[4]).toContain("message-13");
+
+		// Scrolling away again shows the plain label until content grows again.
+		expect(view.handleViewportInput("\x1b[5~")).toBe(true);
+		expect(view.render(12)[4]).not.toContain("New activity");
 	});
 
 	it("routes editor-row clicks through the MouseRoutable contract with frame-local coordinates", () => {
