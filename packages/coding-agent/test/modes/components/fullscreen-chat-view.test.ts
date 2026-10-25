@@ -52,7 +52,8 @@ describe("FullscreenChatView", () => {
 
 		expect(view.handleViewportInput("\x1b[5~")).toBe(true);
 		const pageUp = view.render(12);
-		expect(pageUp[0]).toContain("message-4");
+		// Viewport height 4 keeps a 4-row overlap, clamped to a 1-row minimum step.
+		expect(pageUp[0]).toContain("message-6");
 		expect(pageUp.slice(-2)).toEqual(["status", "editor"]);
 
 		// Click the top of the scrollbar. The visible transcript jumps back to
@@ -80,6 +81,59 @@ describe("FullscreenChatView", () => {
 
 		const rendered = view.render(12);
 		expect(rendered.slice(0, 4).some(line => line.includes("…"))).toBe(false);
+	});
+
+	it("leaves Home/End to the editor and scrolls the viewport on Ctrl+Home/End", () => {
+		const transcript = new LinesComponent(Array.from({ length: 10 }, (_, index) => `message-${index + 1}`));
+		const status = new LinesComponent(["status"]);
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView(
+			[transcript],
+			[status, editorContainer],
+			editorContainer,
+			() => 6,
+			() => editor,
+			() => {},
+		);
+
+		view.render(12);
+		// Leave the tail so the Ctrl+Home/End jumps below are observable.
+		expect(view.handleViewportInput("\x1b[5~")).toBe(true);
+
+		// Plain Home/End move the editor caret instead: the viewport must let
+		// them fall through (upstream Pi returned them to the editor in 1.0.3).
+		expect(view.handleViewportInput("\x1b[H")).toBe(false);
+		expect(view.handleViewportInput("\x1b[F")).toBe(false);
+
+		expect(view.handleViewportInput("\x1b[1;5H")).toBe(true); // ctrl+home
+		expect(view.render(12)[0]).toContain("message-1");
+		expect(view.handleViewportInput("\x1b[1;5F")).toBe(true); // ctrl+end
+		// Back at the tail, and follow-tail re-engaged for future appends.
+		expect(view.render(12)[0]).toContain("message-7");
+	});
+
+	it("consumes wheel events for accelerated scrolling", () => {
+		const transcript = new LinesComponent(Array.from({ length: 30 }, (_, index) => `message-${index + 1}`));
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 6,
+			() => editor,
+			() => {},
+		);
+
+		view.render(12);
+		// Wheel up must be consumed by the viewport regardless of how many lines
+		// the speed heuristic picks (line-count behavior is pinned in the
+		// wheel-scroll unit tests with an injected clock).
+		expect(view.handleViewportInput("\x1b[<64;5;1M")).toBe(true);
+		expect(view.render(12).length).toBe(6);
 	});
 
 	it("routes editor-row clicks through the MouseRoutable contract with frame-local coordinates", () => {

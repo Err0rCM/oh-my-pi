@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import {
+	ALT_WHEEL_SCROLL_MULTIPLIER,
 	type Component,
 	type Container,
 	Ellipsis,
@@ -9,6 +10,7 @@ import {
 	parseSgrMouse,
 	ScrollView,
 	type SgrMouseEvent,
+	WheelScrollAccelerator,
 } from "@oh-my-pi/pi-tui";
 
 /**
@@ -36,6 +38,8 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	#draggingSelection = false;
 	/** Un-styled transcript lines from the last render, backing selection copy. */
 	#transcriptLines: readonly string[] = [];
+	/** Scales wheel events by fling speed so touch scrolling keeps up with a flick. */
+	#wheelAccelerator = new WheelScrollAccelerator();
 
 	constructor(
 		private readonly transcriptComponents: readonly Component[],
@@ -137,30 +141,43 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	}
 
 	#handleViewportKey(data: string): boolean {
-		// Keep normal arrows available to the multiline editor. These fullscreen
-		// navigation keys mirror upstream Pi's alternate-screen defaults.
+		// Keep normal arrows, Home, and End available to the multiline editor
+		// (Home/End must move the caret, not the transcript — upstream Pi moved
+		// them back to the editor in 1.0.3 for the same reason). The viewport
+		// variants use Ctrl: these mirror upstream Pi's alternate-screen defaults.
 		if (matchesKey(data, "pageUp")) {
-			this.#scrollView.page(-1);
+			this.#scrollView.scroll(-this.#pageStep());
 			return true;
 		}
 		if (matchesKey(data, "pageDown")) {
-			this.#scrollView.page(1);
+			this.#scrollView.scroll(this.#pageStep());
 			return true;
 		}
-		if (matchesKey(data, "home")) {
+		if (matchesKey(data, "ctrl+home")) {
 			this.#scrollView.scrollToTop();
 			return true;
 		}
-		if (matchesKey(data, "end")) {
+		if (matchesKey(data, "ctrl+end")) {
 			this.#scrollView.scrollToBottom();
 			return true;
 		}
 		return false;
 	}
 
+	/** Page-turn step that keeps the last lines of the previous page visible (upstream Pi keeps 4). */
+	#pageStep(): number {
+		return Math.max(1, this.#viewportHeight - 4);
+	}
+
 	#handleMouse(event: SgrMouseEvent): boolean {
 		if (event.wheel !== null) {
-			this.#scrollView.scroll(event.wheel);
+			// A trackpad/touch fling emits a dense event stream: scale lines by
+			// event speed (upstream Pi defaults), and let Alt multiply for a jump.
+			const lines = this.#wheelAccelerator.linesForEvent();
+			if (lines > 0) {
+				const alt = (event.button & 8) !== 0;
+				this.#scrollView.scroll(event.wheel * lines * (alt ? ALT_WHEEL_SCROLL_MULTIPLIER : 1));
+			}
 			this.#followTail = this.#scrollView.getScrollOffset() === this.#scrollView.getMaxScrollOffset();
 			return true;
 		}
