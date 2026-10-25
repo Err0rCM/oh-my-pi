@@ -1,12 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { FullscreenChatView } from "@oh-my-pi/pi-coding-agent/modes/components/fullscreen-chat-view";
-import { type Component, Container } from "@oh-my-pi/pi-tui";
+import { type Component, Container, type MouseRoutable } from "@oh-my-pi/pi-tui";
 
-class LinesComponent implements Component {
+class LinesComponent implements Component, MouseRoutable {
 	constructor(private readonly lines: readonly string[]) {}
 
 	render(): readonly string[] {
 		return this.lines;
+	}
+
+	routeMouse(): void {
+		// Not exercised in these tests; the editor slot contract requires it.
 	}
 }
 
@@ -30,7 +34,13 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView([transcript], [status, editorContainer], editorContainer, () => 6);
+		const view = new FullscreenChatView(
+			[transcript],
+			[status, editorContainer],
+			editorContainer,
+			() => 6,
+			() => editor,
+		);
 
 		const initial = view.render(12);
 		expect(initial[0]).toContain("message-7");
@@ -58,10 +68,82 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView([transcript], [status, editorContainer], editorContainer, () => 6);
+		const view = new FullscreenChatView(
+			[transcript],
+			[status, editorContainer],
+			editorContainer,
+			() => 6,
+			() => editor,
+		);
 
 		const rendered = view.render(12);
 		expect(rendered.slice(0, 4).some(line => line.includes("…"))).toBe(false);
+	});
+
+	it("routes editor-row clicks through the MouseRoutable contract with frame-local coordinates", () => {
+		class RoutableEditor implements Component, MouseRoutable {
+			routed: { line: number; col: number }[] = [];
+			render(): readonly string[] {
+				return ["editor-line"];
+			}
+			routeMouse(_event: unknown, line: number, col: number): void {
+				this.routed.push({ line, col });
+			}
+		}
+		const transcript = new LinesComponent(["message"]);
+		const editor = new RoutableEditor();
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 6,
+			() => editor,
+		);
+
+		const rendered = view.render(12);
+		const editorRow = rendered.findIndex(line => line.includes("editor-line"));
+		expect(editorRow).toBeGreaterThanOrEqual(0);
+
+		// Click into the editor row: routed with the row relative to the editor's
+		// own output, and the raw column. A click one row above (viewport) is not routed.
+		expect(view.handleViewportInput(`\x1b[<0;5;${editorRow + 1}M`)).toBe(true);
+		expect(editor.routed).toEqual([{ line: 0, col: 4 }]);
+		expect(view.handleViewportInput("\x1b[<0;5;1M")).toBe(true);
+		expect(editor.routed.length).toBe(1);
+	});
+
+	it("disables editor click routing when dock truncation cuts into the editor", () => {
+		class RoutableEditor implements Component, MouseRoutable {
+			routed = 0;
+			render(): readonly string[] {
+				return ["editor-line"];
+			}
+			routeMouse(): void {
+				this.routed += 1;
+			}
+		}
+		const transcript = new LinesComponent(["message"]);
+		const editor = new RoutableEditor();
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		// terminalRows=1 forces the dock to truncate to a single row (the editor
+		// tail survives only if it is the last row; with the editor first it is
+		// cut away entirely).
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 1,
+			() => editor,
+		);
+
+		view.render(12);
+		for (let row = 0; row < 3; row++) {
+			view.handleViewportInput(`\x1b[<0;5;${row + 1}M`);
+		}
+		expect(editor.routed).toBe(0);
 	});
 
 	it("consumes mouse releases that do not end a scrollbar drag", () => {
@@ -69,7 +151,13 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView([transcript], [editorContainer], editorContainer, () => 6);
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 6,
+			() => editor,
+		);
 
 		view.render(12);
 		// A press away from the scrollbar is ignored by navigation but remains

@@ -341,9 +341,9 @@ export class VirtualTerminal implements Terminal {
 	 * Get the hardware cursor position within the visible viewport.
 	 * Both coordinates are 0-indexed; row is relative to the top of the active grid.
 	 */
-	getCursor(): { row: number; col: number } {
+	getCursor(): { row: number; col: number; visible: boolean } {
 		const cursor = this.#term.cursor;
-		return { row: cursor.y, col: cursor.x };
+		return { row: cursor.y, col: cursor.x, visible: cursor.visible };
 	}
 
 	/** Clear the buffer to a blank slate (fresh engine terminal). */

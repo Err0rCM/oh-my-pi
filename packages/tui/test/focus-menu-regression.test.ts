@@ -78,7 +78,7 @@ describe("focus-changing menu teardown", () => {
 			// "assistant" is re-shown on the grid (its committed copy stays in
 			// scrollback; duplication, never loss).
 			expect(term.getViewport().map(line => line.trimEnd())).toEqual(["assistant", "prompt", "", "", "", ""]);
-			expect(term.getCursor()).toEqual({ row: 1, col: 6 });
+			expect(term.getCursor()).toMatchObject({ row: 1, col: 6 });
 		} finally {
 			tui.stop();
 		}

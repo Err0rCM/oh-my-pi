@@ -56,6 +56,22 @@ describe("ScrollView", () => {
 		expect(view.render(6)).toEqual([`gamma${R}T${R}`, `delta${R}B${R}`]);
 	});
 
+	it("brackets the bar glyph with SGR resets so unterminated row styling cannot bleed into it", () => {
+		// Regression shape from the fullscreen chat view: a thinking block row
+		// ends mid-SGR (italic never reset); the scrollbar glyph must not
+		// inherit it (an italicized "│" renders as a diagonal on mobile fonts).
+		const unterminated = "\x1b[3m\x1b[38;5;248mthinking text";
+		const view = new ScrollView([unterminated, "plain row", "third"], { height: 2, theme });
+		const rows = view.render(30);
+		expect(rows.length).toBe(2);
+		for (const glyph of ["B", "T"]) {
+			const row = rows.find(line => line.endsWith(`${glyph}${R}`)) ?? "";
+			expect(row).not.toBe("");
+			const barAt = row.lastIndexOf(glyph);
+			expect(row.slice(barAt - 4, barAt)).toBe(R);
+		}
+	});
+
 	it("does not render a scrollbar when width is zero", () => {
 		const view = new ScrollView(["one", "two"], { height: 1, theme });
 
