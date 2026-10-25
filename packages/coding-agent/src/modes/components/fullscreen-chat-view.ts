@@ -45,6 +45,8 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	#lastContentLength = 0;
 	/** True once content grew while the user was scrolled away from the tail. */
 	#hasNewActivity = false;
+	/** Active transcript search: typed query plus its literal matches and cursor. */
+	#search: { query: string; matches: TranscriptMatch[]; current: number } | undefined;
 
 	constructor(
 		private readonly transcriptComponents: readonly Component[],
@@ -67,9 +69,79 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		const mouse = parseSgrMouse(data);
 		if (mouse) return this.#handleMouse(mouse);
 
+		// Ctrl+F toggles the transcript search bar. The editor still owns the
+		// bare key as cursor-right's Ctrl twin; fullscreen takes the chord.
+		if (matchesKey(data, "ctrl+f")) {
+			this.#search = this.#search === undefined ? this.#openSearch() : undefined;
+			return true;
+		}
+		if (this.#search !== undefined && this.#handleSearchKey(data)) return true;
+
 		if (!this.#handleViewportKey(data)) return false;
 		this.#syncFollowTail();
 		return true;
+	}
+
+	#openSearch(): { query: string; matches: TranscriptMatch[]; current: number } {
+		// One text affordance at a time: opening search drops any selection.
+		this.#selection = undefined;
+		this.#draggingSelection = false;
+		return { query: "", matches: [], current: 0 };
+	}
+
+	#handleSearchKey(data: string): boolean {
+		if (matchesKey(data, "escape")) {
+			this.#search = undefined;
+			return true;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "ctrl+g")) {
+			this.#stepSearch(1);
+			return true;
+		}
+		if (matchesKey(data, "shift+enter") || matchesKey(data, "ctrl+shift+g")) {
+			this.#stepSearch(-1);
+			return true;
+		}
+		if (matchesKey(data, "backspace")) {
+			this.#typeSearch(this.#search!.query.slice(0, -1));
+			return true;
+		}
+		// Printable text extends the query; other bare control keys (tab…) are
+		// swallowed so they cannot reach the editor mid-search. Escape-sequence
+		// keys (arrows, pageUp…) fall through to viewport navigation instead.
+		if (data.length > 0 && !data.includes("\x1b")) {
+			const typed = [...data].filter(ch => ch >= " " && ch !== "\x7f").join("");
+			if (typed.length > 0) this.#typeSearch(this.#search!.query + typed);
+			return true;
+		}
+		return false;
+	}
+
+	#typeSearch(query: string): void {
+		const search = this.#search!;
+		search.query = query;
+		search.matches = findTranscriptMatches(this.#transcriptLines, query);
+		// Start from the first hit at or below the viewport, wrapping to the top.
+		const firstVisible = this.#scrollView.getScrollOffset();
+		let current = search.matches.findIndex(match => match.line >= firstVisible);
+		if (current === -1) current = 0;
+		search.current = current;
+		this.#jumpToCurrentMatch();
+	}
+
+	#stepSearch(delta: number): void {
+		const search = this.#search!;
+		if (search.matches.length === 0) return;
+		search.current = (search.current + delta + search.matches.length) % search.matches.length;
+		this.#jumpToCurrentMatch();
+	}
+
+	/** Scrolls the current match into the upper third of the viewport without re-engaging follow (upstream Pi). */
+	#jumpToCurrentMatch(): void {
+		const match = this.#search?.matches[this.#search.current];
+		if (match === undefined) return;
+		this.#scrollView.setScrollOffset(Math.max(0, match.line - Math.floor(this.#viewportHeight / 3)));
+		this.#followTail = false;
 	}
 
 	invalidate(): void {
@@ -96,13 +168,20 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 		this.#scrollView.setHeight(this.#viewportHeight);
 		this.#scrollView.setLines(
-			this.#selection === undefined
+			this.#selection === undefined && this.#search === undefined
 				? [...transcriptLines]
 				: transcriptLines.map((line, index) => {
-						const tail = transcriptLines.length - 1 - index;
-						const lo = Math.min(this.#selection!.start, this.#selection!.end);
-						const hi = Math.max(this.#selection!.start, this.#selection!.end);
-						return tail >= lo && tail <= hi ? `\x1b[7m${line}\x1b[0m` : line;
+						if (this.#selection !== undefined) {
+							const tail = transcriptLines.length - 1 - index;
+							const lo = Math.min(this.#selection.start, this.#selection.end);
+							const hi = Math.max(this.#selection.start, this.#selection.end);
+							return tail >= lo && tail <= hi ? `\x1b[7m${line}\x1b[0m` : line;
+						}
+						const ranges = this.#search!.matches.filter(match => match.line === index).map(match => ({
+							start: match.start,
+							end: match.end,
+						}));
+						return highlightTranscriptRanges(line, ranges);
 					}),
 		);
 		if (this.#followTail) this.#scrollView.scrollToBottom();
@@ -113,9 +192,13 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		this.#lastContentLength = transcriptLines.length;
 
 		let transcriptViewport = this.#scrollView.render(this.#width);
-		// The bottom viewport row becomes a jump-to-latest affordance while the
-		// user is scrolled away (upstream Pi) — with a stronger "New activity"
-		// variant once content grew below the fold (Codex).
+		// The first viewport row becomes the search bar while a search is open;
+		// the last one becomes a jump-to-latest affordance while the user is
+		// scrolled away (upstream Pi) — with a stronger "New activity" variant
+		// once content grew below the fold (Codex).
+		if (this.#search !== undefined && transcriptViewport.length > 0) {
+			transcriptViewport = [this.#renderSearchBar(), ...transcriptViewport.slice(1)];
+		}
 		if (this.#hasJumpIndicator() && transcriptViewport.length > 0) {
 			const label = this.#hasNewActivity ? "● New activity · Back to bottom" : "↓ Back to bottom · Ctrl+End";
 			transcriptViewport = [...transcriptViewport.slice(0, -1), this.#renderCentered(label)];
@@ -125,6 +208,14 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 	#hasJumpIndicator(): boolean {
 		return !this.#followTail;
+	}
+
+	#renderSearchBar(): string {
+		const search = this.#search!;
+		const count = search.matches.length === 0 ? "no matches" : `${search.current + 1}/${search.matches.length}`;
+		const label = ` find: ${search.query}▏  ${count} · Enter↓ ⇧Enter↑ · Esc`;
+		const padding = Math.max(0, this.#width - visibleWidth(label));
+		return `\x1b[7m${label}${" ".repeat(padding)}\x1b[0m`;
 	}
 
 	#renderCentered(label: string): string {
@@ -241,6 +332,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		if (event.leftClick && this.#editorDockRows !== undefined && event.row >= this.#viewportHeight) {
 			const dockRow = event.row - this.#viewportHeight;
 			if (dockRow >= this.#editorDockRows.top && dockRow < this.#editorDockRows.top + this.#editorDockRows.count) {
+				this.#search = undefined; // clicking into the composer leaves search mode
 				this.editor().routeMouse(event, dockRow - this.#editorDockRows.top, event.col);
 				return true;
 			}
@@ -277,6 +369,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		if (event.leftClick && event.row < this.#viewportHeight && event.col < scrollbarColumn) {
 			this.#draggingSelection = true;
 			this.#draggingScrollbar = false;
+			this.#search = undefined; // starting a selection leaves search mode
 			this.#selection = { start: Math.max(0, tailLine), end: Math.max(0, tailLine) };
 			return true;
 		}
@@ -318,4 +411,88 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		this.#scrollView.setScrollOffset(Math.round(max * ratio));
 		this.#syncFollowTail();
 	}
+}
+
+/** One literal query hit: [start, end) into the SGR-stripped line text (UTF-16 code units). */
+export type TranscriptMatch = { line: number; start: number; end: number };
+
+/** Find literal case-insensitive query hits across SGR-stripped transcript lines. */
+export function findTranscriptMatches(lines: readonly string[], query: string): TranscriptMatch[] {
+	const needle = query.toLowerCase();
+	if (needle.length === 0) return [];
+	const matches: TranscriptMatch[] = [];
+	for (let line = 0; line < lines.length; line++) {
+		const text = stripVTControlCharacters(lines[line]!).toLowerCase();
+		let start = text.indexOf(needle);
+		while (start !== -1) {
+			matches.push({ line, start, end: start + needle.length });
+			start = text.indexOf(needle, start + needle.length);
+		}
+	}
+	return matches;
+}
+
+/** End index (exclusive) of the CSI/OSC escape sequence starting at `from` in `line`. */
+function endOfEscapeSequence(line: string, from: number): number {
+	const kind = line[from + 1];
+	if (kind === "[") {
+		let i = from + 2;
+		while (i < line.length && !/[A-Za-z]/.test(line[i]!)) i++;
+		return Math.min(line.length, i + 1);
+	}
+	if (kind === "]") {
+		// OSC terminates on BEL or ST (ESC \); OSC 8 link payloads ride inside.
+		for (let i = from + 2; i < line.length; i++) {
+			if (line[i] === "\x07") return i + 1;
+			if (line[i] === "\x1b" && line[i + 1] === "\\") return i + 2;
+		}
+		return line.length;
+	}
+	return Math.min(line.length, from + 2);
+}
+
+/**
+ * Re-insert reverse-video highlights around [start, end) ranges given as
+ * indices into the SGR-stripped line text. Escape sequences pass through
+ * untouched and do not consume index space; adjacent ranges merge so the
+ * on/off sequences never interleave.
+ */
+export function highlightTranscriptRanges(line: string, ranges: readonly { start: number; end: number }[]): string {
+	if (ranges.length === 0) return line;
+	const merged: { start: number; end: number }[] = [];
+	for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+		const last = merged[merged.length - 1];
+		if (last !== undefined && range.start <= last.end) last.end = Math.max(last.end, range.end);
+		else merged.push({ ...range });
+	}
+	let out = "";
+	let textIndex = 0;
+	let rangeIndex = 0;
+	let highlighted = false;
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] === "\x1b") {
+			const end = endOfEscapeSequence(line, i);
+			out += line.slice(i, end);
+			// An in-range SGR (a reset in particular) drops the highlight; re-open it.
+			if (highlighted) out += "\x1b[7m";
+			i = end;
+			continue;
+		}
+		const range = merged[rangeIndex];
+		if (range !== undefined && textIndex === range.start) {
+			out += "\x1b[7m";
+			highlighted = true;
+		}
+		out += line[i];
+		textIndex++;
+		i++;
+		if (range !== undefined && textIndex === range.end) {
+			out += "\x1b[27m";
+			highlighted = false;
+			rangeIndex++;
+		}
+	}
+	if (highlighted) out += "\x1b[27m";
+	return out;
 }

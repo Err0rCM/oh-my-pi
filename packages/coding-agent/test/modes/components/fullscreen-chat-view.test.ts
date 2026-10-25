@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { FullscreenChatView } from "@oh-my-pi/pi-coding-agent/modes/components/fullscreen-chat-view";
+import {
+	FullscreenChatView,
+	findTranscriptMatches,
+	highlightTranscriptRanges,
+} from "@oh-my-pi/pi-coding-agent/modes/components/fullscreen-chat-view";
 import { type Component, Container, type MouseRoutable } from "@oh-my-pi/pi-tui";
 
 class LinesComponent implements Component, MouseRoutable {
@@ -38,6 +42,44 @@ class WrappingComponent implements Component {
 		return lines;
 	}
 }
+
+describe("transcript search helpers", () => {
+	it("finds literal case-insensitive hits across SGR-stripped lines", () => {
+		const lines = ["\x1b[1mHello\x1b[0m world", "no match here", "hello HELLO hello"];
+		expect(findTranscriptMatches(lines, "")).toEqual([]);
+		expect(findTranscriptMatches(lines, "hello")).toEqual([
+			{ line: 0, start: 0, end: 5 },
+			{ line: 2, start: 0, end: 5 },
+			{ line: 2, start: 6, end: 11 },
+			{ line: 2, start: 12, end: 17 },
+		]);
+	});
+});
+
+describe("highlightTranscriptRanges", () => {
+	it("passes through escape sequences without consuming index space", () => {
+		expect(highlightTranscriptRanges("\x1b[1mabc\x1b[0mdef", [{ start: 2, end: 5 }])).toBe(
+			"\x1b[1mab\x1b[7mc\x1b[0m\x1b[7mde\x1b[27mf",
+		);
+	});
+
+	it("keeps OSC 8 link payloads intact", () => {
+		const line = "\x1b]8;;https://example.com\x1b\\clickable\x1b]8;;\x1b\\ tail";
+		expect(highlightTranscriptRanges(line, [{ start: 0, end: 4 }])).toBe(
+			"\x1b]8;;https://example.com\x1b\\\x1b[7mclic\x1b[27mkable\x1b]8;;\x1b\\ tail",
+		);
+	});
+
+	it("merges adjacent ranges and ignores empty input", () => {
+		expect(highlightTranscriptRanges("abcdef", [])).toBe("abcdef");
+		expect(
+			highlightTranscriptRanges("abcdef", [
+				{ start: 0, end: 2 },
+				{ start: 2, end: 4 },
+			]),
+		).toBe("\x1b[7mabcd\x1b[27mef");
+	});
+});
 
 describe("FullscreenChatView", () => {
 	it("keeps the editor dock visible while history scrolls independently", () => {
@@ -188,6 +230,68 @@ describe("FullscreenChatView", () => {
 		// Scrolling away again shows the plain label until content grows again.
 		expect(view.handleViewportInput("\x1b[5~")).toBe(true);
 		expect(view.render(12)[4]).not.toContain("New activity");
+	});
+
+	it("opens, types, cycles, and closes the transcript search bar", () => {
+		const transcript = new LinesComponent(
+			Array.from({ length: 20 }, (_, index) => (index % 3 === 0 ? `alpha line ${index}` : `beta line ${index}`)),
+		);
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 8,
+			() => editor,
+			() => {},
+		);
+
+		view.render(12);
+		// Ctrl+F opens the bar over the first viewport row.
+		expect(view.handleViewportInput("\x06")).toBe(true);
+		const bar = view.render(12);
+		expect(bar[0]).toContain("find:");
+		expect(bar[0]).toContain("no matches");
+
+		// Typing filters incrementally and lands on the first on-screen hit.
+		for (const ch of "alpha") expect(view.handleViewportInput(ch)).toBe(true);
+		const searching = view.render(12);
+		expect(searching[0]).toContain("5/7");
+		expect(searching.slice(1, 8).some(line => line.includes("alpha"))).toBe(true);
+
+		// Enter cycles with wraparound; Esc closes and restores content row 0.
+		expect(view.handleViewportInput("\r")).toBe(true);
+		const next = view.render(12);
+		expect(next[0]).toContain("6/7");
+		expect(view.handleViewportInput("\x1b")).toBe(true);
+		const closed = view.render(12);
+		expect(closed[0]).not.toContain("find:");
+	});
+
+	it("scrolls the current match into the upper third of the viewport", () => {
+		const transcript = new LinesComponent(Array.from({ length: 40 }, (_, index) => `row ${index}`));
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 8,
+			() => editor,
+			() => {},
+		);
+
+		view.render(12);
+		expect(view.handleViewportInput("\x06")).toBe(true);
+		for (const ch of "row 30") expect(view.handleViewportInput(ch)).toBe(true);
+		const rendered = view.render(12);
+		// Match line 30 should sit floor(7/3) = 2 rows below the search bar
+		// (the bar itself replaces the first viewport row, shifting content by one).
+		expect(rendered[2]).toContain("row 30");
+		expect(rendered[2]).toContain("\x1b[7mrow 30\x1b[27m");
 	});
 
 	it("routes editor-row clicks through the MouseRoutable contract with frame-local coordinates", () => {
