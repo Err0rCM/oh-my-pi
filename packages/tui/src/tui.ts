@@ -524,8 +524,14 @@ interface PreparedLine {
 // terminal dispatch one SGR instead of several. On a real transcript ~40% of
 // all SGR sequences are collapsible this way, which meaningfully cuts the
 // per-frame byte volume and SGR-dispatch count a slow (xterm.js/WebGL) terminal
-// must process. On by default; `PI_NO_SGR_COALESCE=1` disables it.
-const SGR_COALESCE_ENABLED = !$flag("PI_NO_SGR_COALESCE");
+// must process. On by default; `PI_NO_SGR_COALESCE=1` disables it. Disabled
+// under tmux: its DEC 2026 synchronized-output handling drops reverse-video
+// and other attributes from merged SGR parameter runs, so the byte savings
+// turn into lost styling (observed with the fullscreen selection highlight).
+/** Runtime check (not a module constant) so tests can pin the behavior regardless of the host shell. */
+function sgrCoalesceEnabled(): boolean {
+	return !$flag("PI_NO_SGR_COALESCE") && !Bun.env.TMUX;
+}
 const CC_ESC = 0x1b;
 const CC_BRACKET = 0x5b; // [
 const CC_M = 0x6d; // m
@@ -579,7 +585,7 @@ function endsWithIncompleteExtendedColor(params: string): boolean {
  * merges, so SGR-light lines incur only a single `indexOf` scan.
  */
 export function coalesceAdjacentSgr(line: string): string {
-	if (!SGR_COALESCE_ENABLED || line.indexOf("\x1b[") === -1) return line;
+	if (!sgrCoalesceEnabled() || line.indexOf("\x1b[") === -1) return line;
 	const n = line.length;
 	let out = "";
 	let copiedUpto = 0;

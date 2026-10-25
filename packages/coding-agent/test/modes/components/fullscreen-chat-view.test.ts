@@ -182,13 +182,9 @@ describe("FullscreenChatView", () => {
 		// SGR stripped, trailing padding trimmed, three lines joined.
 		expect(decoded).toBe("msg-one\nmsg-two\nmsg-three");
 
-		// The highlight stays after release until the next press clears it.
+		// The highlight clears on release right after the copy fires.
 		const after = view.render(12);
-		expect(after[2]).toContain("\x1b[7m");
-		expect(view.handleViewportInput("\x1b[<0;2;4M")).toBe(true);
-		expect(writes.length).toBe(1); // a new press has not released yet — no new OSC 52
-		const cleared = view.render(12);
-		expect(cleared[0]).not.toContain("\x1b[7m");
+		expect(after[0]).not.toContain("\x1b[7m");
 	});
 
 	it("does not start a selection from clicks on the editor rows", () => {

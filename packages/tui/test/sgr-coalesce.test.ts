@@ -1,6 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { coalesceAdjacentSgr } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "./virtual-terminal";
+
+// The production gate disables coalescing under tmux; pin the host env so these
+// behavior tests exercise the merge path regardless of where they run.
+beforeEach(() => {
+	delete Bun.env.TMUX;
+});
 
 const SGR = /\x1b\[([0-9;:]*)m/g;
 function sgrSequences(s: string): string[] {

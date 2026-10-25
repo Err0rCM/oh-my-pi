@@ -27,7 +27,11 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	#draggingScrollbar = false;
 	/** Editor rows within the dock, from the last render; undefined when the editor is not laid out. */
 	#editorDockRows: { top: number; count: number } | undefined;
-	/** Selected transcript content lines (inclusive range), kept across scrolls; cleared by the next press. */
+	/**
+	 * Selected transcript content lines as tail-relative indices (0 = last
+	 * line), which stay glued to the same content while streaming appends rows
+	 * at the end. Highlight is cleared on release after the copy fires.
+	 */
 	#selection: { start: number; end: number } | undefined;
 	#draggingSelection = false;
 	/** Un-styled transcript lines from the last render, backing selection copy. */
@@ -85,9 +89,12 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		this.#scrollView.setLines(
 			this.#selection === undefined
 				? [...transcriptLines]
-				: transcriptLines.map((line, index) =>
-						index >= this.#selection!.start && index <= this.#selection!.end ? `\x1b[7m${line}\x1b[0m` : line,
-					),
+				: transcriptLines.map((line, index) => {
+						const tail = transcriptLines.length - 1 - index;
+						const lo = Math.min(this.#selection!.start, this.#selection!.end);
+						const hi = Math.max(this.#selection!.start, this.#selection!.end);
+						return tail >= lo && tail <= hi ? `\x1b[7m${line}\x1b[0m` : line;
+					}),
 		);
 		if (this.#followTail) this.#scrollView.scrollToBottom();
 
@@ -168,6 +175,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			if (this.#draggingSelection) {
 				this.#draggingSelection = false;
 				this.#emitSelectionClipboard();
+				this.#selection = undefined;
 			}
 			// Mouse tracking is enabled for the whole fullscreen surface, so even a
 			// release that did not end a scrollbar drag must stay out of the editor.
@@ -205,15 +213,15 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		// extends it, release commits it to the clipboard. Anchored to content
 		// line indices so the selection survives scrolling while dragging.
 		const contentLine = this.#scrollView.getScrollOffset() + event.row;
+		const tailLine = this.#transcriptLines.length - 1 - contentLine;
 		if (event.leftClick && event.row < this.#viewportHeight && event.col < scrollbarColumn) {
 			this.#draggingSelection = true;
 			this.#draggingScrollbar = false;
-			this.#selection = { start: contentLine, end: contentLine };
+			this.#selection = { start: Math.max(0, tailLine), end: Math.max(0, tailLine) };
 			return true;
 		}
 		if (event.motion && (event.button & 3) === 0 && this.#draggingSelection) {
-			const clamped = Math.max(0, Math.min(contentLine, this.#transcriptLines.length - 1));
-			if (this.#selection) this.#selection.end = clamped;
+			if (this.#selection) this.#selection.end = Math.max(0, tailLine);
 			return true;
 		}
 		// Mouse tracking is active while fullscreen owns the TTY. Consume idle
@@ -224,8 +232,14 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	/** Push the selected transcript lines (styled text stripped) to the client clipboard via OSC 52. */
 	#emitSelectionClipboard(): void {
 		if (this.#selection === undefined) return;
-		const start = Math.max(0, this.#selection.start);
-		const end = Math.min(this.#selection.end, this.#transcriptLines.length - 1);
+		const start = Math.max(
+			0,
+			this.#transcriptLines.length - 1 - Math.max(this.#selection.start, this.#selection.end),
+		);
+		const end = Math.min(
+			this.#transcriptLines.length - 1,
+			this.#transcriptLines.length - 1 - Math.min(this.#selection.start, this.#selection.end),
+		);
 		if (end < start) return;
 		const text = this.#transcriptLines
 			.slice(start, end + 1)
