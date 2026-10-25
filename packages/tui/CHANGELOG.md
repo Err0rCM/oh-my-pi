@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fullscreen alt frames now park the hardware cursor on a focused editor's caret marker (previously discarded, leaving the composer with no visible cursor for the whole session), reposition on caret-only moves through the identical-frame skip path, respect the Show Hardware Cursor preference, and re-hide when a frame carries no marker.
+- ScrollView scrollbar glyphs are bracketed with SGR resets so a row ending mid-sequence (e.g. an italic thinking block) can no longer bleed its styling into the scrollbar column.
+
+### Added
+
+- `Editor.moveCursorToRenderedPosition` + `MouseRoutable` routing: hosts can translate a pointer click on rendered editor rows into a caret move (word-wrap aware, surrogate-pair safe, clamped to EOL).
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

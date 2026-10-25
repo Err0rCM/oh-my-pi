@@ -2,6 +2,7 @@ import {
 	type Component,
 	type Container,
 	Ellipsis,
+	type MouseRoutable,
 	matchesKey,
 	type OverlayFocusOwner,
 	parseSgrMouse,
@@ -31,9 +32,8 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		private readonly dockComponents: readonly Component[],
 		private readonly editorContainer: Container,
 		private readonly terminalRows: () => number,
-		private readonly editor?: Component & {
-			moveCursorToRenderedPosition(row: number, col: number, renderWidth: number): boolean;
-		},
+		/** Resolved at click time: the editor slot can be hot-swapped while fullscreen is up (approval prompts, visualizers), and a stale captured instance would silently route clicks into an unmounted editor. */
+		private readonly editor: () => Component & MouseRoutable,
 	) {}
 
 	/** Lets the normal editor slot keep keyboard focus while this overlay owns the screen. */
@@ -110,9 +110,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			if (editorTop >= 0) editorTop -= lines.length - dockLines.length;
 		}
 		this.#editorDockRows =
-			this.editor && editorTop >= 0 && editorTop < dockLines.length
-				? { top: editorTop, count: editorCount }
-				: undefined;
+			editorTop >= 0 && editorTop < dockLines.length ? { top: editorTop, count: editorCount } : undefined;
 		return dockLines;
 	}
 
@@ -152,15 +150,16 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			return true;
 		}
 
-		// Click into the editor's rows: position the caret at the clicked
-		// glyph (click-to-position, CC-style). Runs before generic click
-		// handling so the press never falls through to the scrollbar path.
-		if (event.leftClick && this.editor && this.#editorDockRows !== undefined && event.row >= this.#viewportHeight) {
+		// Click into the editor's rows: forward through the MouseRoutable
+		// contract with frame-local coordinates so the editor can position its
+		// caret at the clicked glyph (click-to-position, CC-style). The editor
+		// rows and the scrollbar column live in disjoint row ranges (dock vs
+		// viewport), so this and the scrollbar-drag path never compete.
+		if (event.leftClick && this.#editorDockRows !== undefined && event.row >= this.#viewportHeight) {
 			const dockRow = event.row - this.#viewportHeight;
 			if (dockRow >= this.#editorDockRows.top && dockRow < this.#editorDockRows.top + this.#editorDockRows.count) {
-				if (this.editor.moveCursorToRenderedPosition(dockRow - this.#editorDockRows.top, event.col, this.#width)) {
-					return true;
-				}
+				this.editor().routeMouse(event, dockRow - this.#editorDockRows.top, event.col);
+				return true;
 			}
 		}
 

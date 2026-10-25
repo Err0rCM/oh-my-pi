@@ -2987,7 +2987,9 @@ export class TUI extends Container {
 			}
 			// Identical pixels can still hide a caret move: the marker is
 			// stripped before the comparison, so "text unchanged, cursor one
-			// glyph over" compares equal. Reposition the cursor alone.
+			// glyph over" compares equal. Reposition the cursor alone — or
+			// re-hide it when this frame carries no marker, so a cursor left
+			// visible by a previous frame cannot linger at a stale position.
 			if (same) {
 				const parked = this.#altCursorSequence(markers?.[0], width, height);
 				if (parked) this.terminal.write(parked);
@@ -3003,15 +3005,41 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#altPreviousLines = fitted;
-		this.#debugPaint = { lines: fitted, windowTop: 0, altScreen: true };
+		const cursorState = this.#altCursorTarget(markers?.[0], width, height);
+		this.#debugPaint = {
+			lines: fitted,
+			windowTop: 0,
+			altScreen: true,
+			...(cursorState === null
+				? {}
+				: { cursor: { x: cursorState.col, y: cursorState.row, visible: cursorState.visible } }),
+		};
 		this.#fullRedrawCount += 1;
 	}
 
-	/** Sequence parking the hardware cursor on an alt-frame caret marker, or "" to keep it hidden. */
+	/** Clamp an alt-frame caret marker through the shared cursor-state policy (col also capped to the frame width). */
+	#altCursorTarget(
+		marker: { row: number; col: number } | undefined,
+		width: number,
+		height: number,
+	): HardwareCursorState | null {
+		if (marker === undefined) return null;
+		return this.#targetHardwareCursorState(
+			{ row: marker.row, col: Math.min(marker.col, Math.max(0, width - 1)) },
+			height,
+		);
+	}
+
+	/**
+	 * Cursor parking sequence for an alt frame. With a marker: clamp through
+	 * #altCursorTarget (honoring the hardware-cursor preference, like the
+	 * normal-screen path) and position, showing only when that preference
+	 * allows. Without a marker: hide, so the cursor never lingers visible at a
+	 * stale position after the focused editor disappeared from the frame.
+	 */
 	#altCursorSequence(marker: { row: number; col: number } | undefined, width: number, height: number): string {
-		if (marker === undefined) return "";
-		const row = Math.max(0, Math.min(marker.row, height - 1));
-		const col = Math.max(0, Math.min(marker.col, width - 1));
-		return `\x1b[${row + 1};${col + 1}H\x1b[?25h`;
+		const target = this.#altCursorTarget(marker, width, height);
+		if (target === null) return "\x1b[?25l";
+		return `\x1b[${target.row + 1};${target.col + 1}H${target.visible ? "\x1b[?25h" : "\x1b[?25l"}`;
 	}
 }

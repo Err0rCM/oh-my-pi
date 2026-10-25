@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The fullscreen chat mode now routes pointer clicks on the composer through `MouseRoutable` so tapping the editor positions the caret at the clicked glyph (phone SSH and desktop alike), instead of the click being silently consumed.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

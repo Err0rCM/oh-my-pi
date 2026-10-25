@@ -11,6 +11,7 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
+import type { SgrMouseEvent } from "../mouse";
 import type { SymbolTheme } from "../symbols";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import {
@@ -489,6 +490,9 @@ export class Editor implements Component, Focusable {
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
+	// Terminal width the last render() was invoked with; undefined before the
+	// first render. Pointer-to-caret mapping replays the layout at this width.
+	#lastRenderWidth: number | undefined;
 	// Decoration rows the last render emitted before the first text row
 	// (top border/chrome), so pointer positions can be mapped back to layout rows.
 	#textRowOffset: number = 0;
@@ -1034,6 +1038,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): readonly string[] {
+		this.#lastRenderWidth = width;
 		const style = this.#effectiveStyle();
 		const paddingX = this.#getEditorPaddingX();
 		const isSideBordered = style.sideBorders;
@@ -1974,20 +1979,25 @@ export class Editor implements Component, Focusable {
 
 	/**
 	 * Position the caret from a pointer click on a rendered output row of the
-	 * most recent render at `renderWidth`. `renderedRow` indexes the render()
-	 * output (scrollbar/autocomplete rows included in the numbering, but only
-	 * text rows map); `col` is the 0-based column of the full row, gutter and
-	 * side chrome included. Width-changing decorations (paste-marker expansion)
-	 * are not reversible — the mapping clamps to the underlying layout text, so
-	 * a click on decorated output lands on the nearest caret position.
-	 * Returns true when the click mapped into editor text.
+	 * most recent render. `renderedRow` indexes the render() output (chrome,
+	 * scrollbar and autocomplete rows included in the numbering, but only text
+	 * rows map); `col` is the 0-based column of the full row, gutter and side
+	 * chrome included. Uses the layout width recorded by that render, so the
+	 * mapping always matches what is on screen. Width-changing decorations
+	 * (paste-marker expansion) are not reversible — the mapping clamps to the
+	 * underlying layout text, so a click on decorated output lands on the
+	 * nearest caret position. Returns true when the click mapped into editor
+	 * text.
 	 */
-	moveCursorToRenderedPosition(renderedRow: number, col: number, renderWidth: number): boolean {
+	moveCursorToRenderedPosition(renderedRow: number, col: number): boolean {
 		if (renderedRow < 0 || col < 0 || !Number.isFinite(renderedRow) || !Number.isFinite(col)) return false;
+		const renderWidth = this.#lastRenderWidth;
+		if (renderWidth === undefined) return false; // never rendered; nothing on screen to click
 		const paddingX = this.#getEditorPaddingX();
+		const layoutWidth = this.#getLayoutWidth(renderWidth, paddingX);
 		const promptGutter = this.#getPromptGutter(renderWidth, paddingX);
 		const chrome = this.#getHorizontalChromeWidth(paddingX);
-		const layoutLines = this.#layoutText(this.#getLayoutWidth(renderWidth, paddingX));
+		const layoutLines = this.#layoutText(layoutWidth);
 		const visibleHeight = this.#getVisibleContentHeight(layoutLines.length);
 		const textRow = renderedRow - this.#textRowOffset;
 		if (textRow < 0 || textRow >= visibleHeight) return false; // chrome row, or past the text rows
@@ -1998,21 +2008,34 @@ export class Editor implements Component, Focusable {
 		const textStartCol = chrome + visibleWidth(gutterText);
 		const textCol = col - textStartCol;
 		if (textCol < 0) return false; // clicked the gutter or side chrome
-		// Invert the column-width mapping: walk the layout text accumulating
-		// cell widths; a click on the left half of a wide glyph stops before it.
+		// Invert the column-width mapping: walk the layout text by grapheme
+		// accumulating cell widths (zero-width glyphs contribute none), and
+		// accumulate the caret offset in UTF-16 code units, the coordinate
+		// cursorCol uses. A click on either cell of a wide glyph stops before
+		// the glyph — that is deliberate: stopping after its left half could
+		// be misread as a caret inside a surrogate-free but visually split
+		// cell, and every emitter of cursorCol treats text as UTF-16 slices.
 		let acc = 0;
 		let idx = 0;
 		for (const { segment: ch } of segmenter.segment(layout.text)) {
-			const w = visibleWidth(ch) || 1;
+			const w = visibleWidth(ch);
 			if (acc + w > textCol) break;
 			acc += w;
-			idx += [...ch].length;
+			idx += ch.length;
 		}
 		this.#state.cursorLine = layout.sourceLine;
 		this.#setCursorCol(layout.sourceStartCol + idx);
-		this.#updateScrollOffset(this.#getLayoutWidth(renderWidth, paddingX), layoutLines, visibleHeight);
+		this.#updateScrollOffset(layoutWidth, layoutLines, visibleHeight);
 		this.invalidate();
 		return true;
+	}
+
+	/**
+	 * MouseRoutable host contract: translate a routed left-click on this
+	 * editor's rendered output into a caret move. Non-click events are ignored.
+	 */
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		if (event.leftClick) this.moveCursorToRenderedPosition(line, col);
 	}
 
 	moveToLineStart(): void {
