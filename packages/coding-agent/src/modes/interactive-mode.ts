@@ -4931,6 +4931,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.editorContainer,
 				() => this.ui.terminal.rows,
 				() => this.editor,
+				data => this.ui.terminal.write(data),
 			);
 			this.#fullscreenChatInputUnsubscribe = this.ui.addInputListener(data => {
 				const focused = this.ui.getFocused();

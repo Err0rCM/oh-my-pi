@@ -4,6 +4,7 @@
 
 ### Added
 
+- Fullscreen chat transcript selection: press and drag over the history to select lines (highlighted), release to push them to the client clipboard via OSC 52 (honored by most terminals and tmux with `set-clipboard on`); Shift-drag still defers to the terminal's native selection where supported.
 - The fullscreen chat mode now routes pointer clicks on the composer through `MouseRoutable` so tapping the editor positions the caret at the clicked glyph (phone SSH and desktop alike), instead of the click being silently consumed.
 
 ## [18.0.10] - 2026-08-28

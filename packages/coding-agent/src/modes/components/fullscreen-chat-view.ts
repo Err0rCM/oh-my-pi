@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import {
 	type Component,
 	type Container,
@@ -26,14 +27,21 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	#draggingScrollbar = false;
 	/** Editor rows within the dock, from the last render; undefined when the editor is not laid out. */
 	#editorDockRows: { top: number; count: number } | undefined;
+	/** Selected transcript content lines (inclusive range), kept across scrolls; cleared by the next press. */
+	#selection: { start: number; end: number } | undefined;
+	#draggingSelection = false;
+	/** Un-styled transcript lines from the last render, backing selection copy. */
+	#transcriptLines: readonly string[] = [];
 
 	constructor(
 		private readonly transcriptComponents: readonly Component[],
 		private readonly dockComponents: readonly Component[],
 		private readonly editorContainer: Container,
 		private readonly terminalRows: () => number,
-		/** Resolved at click time: the editor slot can be hot-swapped while fullscreen is up (approval prompts, visualizers), and a stale captured instance would silently route clicks into an unmounted editor. */
+		/** Resolved at click time: the editor slot can be hot-swapped while fullscreen is up (approval prompts, visualizers), and a stale captured instance would silently route clicks into an unmounted instance. */
 		private readonly editor: () => Component & MouseRoutable,
+		/** Raw terminal write for one-shot sequences that must not race a frame (OSC 52 clipboard push). */
+		private readonly write: (data: string) => void,
 	) {}
 
 	/** Lets the normal editor slot keep keyboard focus while this overlay owns the screen. */
@@ -71,9 +79,16 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			transcriptWidth === this.#width
 				? fullWidthTranscript
 				: this.#renderComponents(this.transcriptComponents, transcriptWidth);
+		this.#transcriptLines = transcriptLines;
 
 		this.#scrollView.setHeight(this.#viewportHeight);
-		this.#scrollView.setLines(transcriptLines);
+		this.#scrollView.setLines(
+			this.#selection === undefined
+				? [...transcriptLines]
+				: transcriptLines.map((line, index) =>
+						index >= this.#selection!.start && index <= this.#selection!.end ? `\x1b[7m${line}\x1b[0m` : line,
+					),
+		);
 		if (this.#followTail) this.#scrollView.scrollToBottom();
 
 		const transcriptViewport = this.#scrollView.render(this.#width);
@@ -145,6 +160,15 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 		if (event.release) {
 			this.#draggingScrollbar = false;
+			// A finished drag over the transcript commits the selection: push the
+			// covered lines to the client clipboard via OSC 52 (the only clipboard
+			// that reaches the user over SSH) and keep the highlight until the
+			// next press. Requires client support: most terminals and tmux
+			// (`set-clipboard on`) honor it.
+			if (this.#draggingSelection) {
+				this.#draggingSelection = false;
+				this.#emitSelectionClipboard();
+			}
 			// Mouse tracking is enabled for the whole fullscreen surface, so even a
 			// release that did not end a scrollbar drag must stay out of the editor.
 			return true;
@@ -166,6 +190,8 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		const scrollbarColumn = this.#width - 1;
 		if (event.leftClick && event.col === scrollbarColumn && event.row < this.#viewportHeight) {
 			this.#draggingScrollbar = true;
+			this.#draggingSelection = false;
+			this.#selection = undefined;
 			this.#scrollToPointer(event.row);
 			return true;
 		}
@@ -173,9 +199,42 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			this.#scrollToPointer(event.row);
 			return true;
 		}
+
+		// Line selection over the transcript: press starts (or restarts) a
+		// selection on the content line under the pointer, a left-button drag
+		// extends it, release commits it to the clipboard. Anchored to content
+		// line indices so the selection survives scrolling while dragging.
+		const contentLine = this.#scrollView.getScrollOffset() + event.row;
+		if (event.leftClick && event.row < this.#viewportHeight && event.col < scrollbarColumn) {
+			this.#draggingSelection = true;
+			this.#draggingScrollbar = false;
+			this.#selection = { start: contentLine, end: contentLine };
+			return true;
+		}
+		if (event.motion && (event.button & 3) === 0 && this.#draggingSelection) {
+			const clamped = Math.max(0, Math.min(contentLine, this.#transcriptLines.length - 1));
+			if (this.#selection) this.#selection.end = clamped;
+			return true;
+		}
 		// Mouse tracking is active while fullscreen owns the TTY. Consume idle
 		// motion and clicks so their escape sequences never enter the editor.
 		return true;
+	}
+
+	/** Push the selected transcript lines (styled text stripped) to the client clipboard via OSC 52. */
+	#emitSelectionClipboard(): void {
+		if (this.#selection === undefined) return;
+		const start = Math.max(0, this.#selection.start);
+		const end = Math.min(this.#selection.end, this.#transcriptLines.length - 1);
+		if (end < start) return;
+		const text = this.#transcriptLines
+			.slice(start, end + 1)
+			.map(line => stripVTControlCharacters(line).trimEnd())
+			.join("\n");
+		if (text.length === 0) return;
+		// OSC 52 payloads are base64; terminals cap them (tmux defaults to 256 KiB),
+		// which covers multi-screen selections comfortably.
+		this.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
 	}
 
 	#scrollToPointer(row: number): void {

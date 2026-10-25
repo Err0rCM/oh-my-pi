@@ -40,6 +40,7 @@ describe("FullscreenChatView", () => {
 			editorContainer,
 			() => 6,
 			() => editor,
+			() => {},
 		);
 
 		const initial = view.render(12);
@@ -74,6 +75,7 @@ describe("FullscreenChatView", () => {
 			editorContainer,
 			() => 6,
 			() => editor,
+			() => {},
 		);
 
 		const rendered = view.render(12);
@@ -100,6 +102,7 @@ describe("FullscreenChatView", () => {
 			editorContainer,
 			() => 6,
 			() => editor,
+			() => {},
 		);
 
 		const rendered = view.render(12);
@@ -137,6 +140,7 @@ describe("FullscreenChatView", () => {
 			editorContainer,
 			() => 1,
 			() => editor,
+			() => {},
 		);
 
 		view.render(12);
@@ -144,6 +148,69 @@ describe("FullscreenChatView", () => {
 			view.handleViewportInput(`\x1b[<0;5;${row + 1}M`);
 		}
 		expect(editor.routed).toBe(0);
+	});
+
+	it("selects transcript lines on drag and pushes them via OSC 52 on release", () => {
+		const transcript = new LinesComponent(["\x1b[1mmsg-one\x1b[0m", "msg-two", "msg-three", "msg-four"]);
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const writes: string[] = [];
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 6,
+			() => editor,
+			data => writes.push(data),
+		);
+
+		// viewport = 6 - 1 dock row = 5 rows; content 4 lines fits, scrollOffset 0.
+		view.render(12);
+		// Press on row 0, drag to row 2 (button 32 = left drag), release.
+		expect(view.handleViewportInput("\x1b[<0;2;1M")).toBe(true);
+		const mid = view.render(12);
+		expect(mid[0]).toContain("\x1b[7m"); // selection highlight on the first line
+		expect(view.handleViewportInput("\x1b[<32;2;3M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<0;2;3m")).toBe(true);
+
+		expect(writes.length).toBe(1);
+		const osc = writes[0] ?? "";
+		expect(osc.startsWith("\x1b]52;c;")).toBe(true);
+		const b64 = osc.slice("\x1b]52;c;".length).replace(/\x07$/, "");
+		const decoded = Buffer.from(b64, "base64").toString("utf8");
+		// SGR stripped, trailing padding trimmed, three lines joined.
+		expect(decoded).toBe("msg-one\nmsg-two\nmsg-three");
+
+		// The highlight stays after release until the next press clears it.
+		const after = view.render(12);
+		expect(after[2]).toContain("\x1b[7m");
+		expect(view.handleViewportInput("\x1b[<0;2;4M")).toBe(true);
+		expect(writes.length).toBe(1); // a new press has not released yet — no new OSC 52
+		const cleared = view.render(12);
+		expect(cleared[0]).not.toContain("\x1b[7m");
+	});
+
+	it("does not start a selection from clicks on the editor rows", () => {
+		const transcript = new LinesComponent(["message"]);
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const writes: string[] = [];
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 3,
+			() => editor,
+			data => writes.push(data),
+		);
+
+		const rendered = view.render(12);
+		const editorRow = rendered.findIndex(line => line.includes("editor"));
+		expect(view.handleViewportInput(`\x1b[<0;2;${editorRow + 1}M`)).toBe(true);
+		expect(view.handleViewportInput(`\x1b[<0;2;${editorRow + 1}m`)).toBe(true);
+		expect(writes.length).toBe(0);
 	});
 
 	it("consumes mouse releases that do not end a scrollbar drag", () => {
@@ -157,6 +224,7 @@ describe("FullscreenChatView", () => {
 			editorContainer,
 			() => 6,
 			() => editor,
+			() => {},
 		);
 
 		view.render(12);
