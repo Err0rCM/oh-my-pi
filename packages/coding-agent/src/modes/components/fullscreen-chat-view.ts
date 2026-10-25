@@ -4,6 +4,7 @@ import {
 	type Component,
 	type Container,
 	Ellipsis,
+	getSegmenter,
 	type MouseRoutable,
 	matchesKey,
 	type OverlayFocusOwner,
@@ -13,6 +14,8 @@ import {
 	visibleWidth,
 	WheelScrollAccelerator,
 } from "@oh-my-pi/pi-tui";
+
+const segmenter = getSegmenter();
 
 /**
  * Persistent alternate-screen chat surface.
@@ -31,12 +34,22 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	/** Editor rows within the dock, from the last render; undefined when the editor is not laid out. */
 	#editorDockRows: { top: number; count: number } | undefined;
 	/**
-	 * Selected transcript content lines as tail-relative indices (0 = last
-	 * line), which stay glued to the same content while streaming appends rows
-	 * at the end. Highlight is cleared on release after the copy fires.
+	 * Character-level selection as two tail-relative anchors. Lines and
+	 * code-unit offsets stay glued to the same content while streaming appends
+	 * rows at the end. Highlight is cleared on release after the copy fires.
 	 */
-	#selection: { start: number; end: number } | undefined;
+	#selection: { anchor: SelectionPoint; head: SelectionPoint } | undefined;
 	#draggingSelection = false;
+	/** Last press position and time, for double/triple-click word and line selection. */
+	#lastClick: { ms: number; row: number; col: number; count: number } | undefined;
+	/** Drag auto-scroll state: direction while the pointer holds against a viewport edge. */
+	#autoScrollTimer: ReturnType<typeof setInterval> | undefined;
+	#autoScrollDir = 0;
+	/** Column of the last drag motion, so auto-scroll extends the head at the pointer's column. */
+	#dragCol = 0;
+	/** Transient copy feedback replacing the last viewport row for a moment. */
+	#flash: { text: string; until: number } | undefined;
+	#flashTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Un-styled transcript lines from the last render, backing selection copy. */
 	#transcriptLines: readonly string[] = [];
 	/** Scales wheel events by fling speed so touch scrolling keeps up with a flick. */
@@ -57,6 +70,8 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		private readonly editor: () => Component & MouseRoutable,
 		/** Raw terminal write for one-shot sequences that must not race a frame (OSC 52 clipboard push). */
 		private readonly write: (data: string) => void,
+		/** Asks the host for a re-render; drives drag auto-scroll and copy-flash timers. */
+		private readonly requestRender: () => void = () => {},
 	) {}
 
 	/** Lets the normal editor slot keep keyboard focus while this overlay owns the screen. */
@@ -145,6 +160,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	}
 
 	invalidate(): void {
+		this.#stopAutoScroll();
 		for (const component of this.transcriptComponents) component.invalidate?.();
 		for (const component of this.dockComponents) component.invalidate?.();
 	}
@@ -173,9 +189,16 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 				: transcriptLines.map((line, index) => {
 						if (this.#selection !== undefined) {
 							const tail = transcriptLines.length - 1 - index;
-							const lo = Math.min(this.#selection.start, this.#selection.end);
-							const hi = Math.max(this.#selection.start, this.#selection.end);
-							return tail >= lo && tail <= hi ? `\x1b[7m${line}\x1b[0m` : line;
+							const [top, bottom] = this.#normalizedSelection();
+							if (tail <= top.line && tail >= bottom.line) {
+								const length = stripVTControlCharacters(line).length;
+								const startUnit = tail === top.line ? top.unit : 0;
+								const endUnit = tail === bottom.line ? bottom.unit : length;
+								if (endUnit > startUnit) {
+									return highlightTranscriptRanges(line, [{ start: startUnit, end: endUnit }]);
+								}
+							}
+							return line;
 						}
 						const ranges = this.#search!.matches.filter(match => match.line === index).map(match => ({
 							start: match.start,
@@ -199,7 +222,9 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		if (this.#search !== undefined && transcriptViewport.length > 0) {
 			transcriptViewport = [this.#renderSearchBar(), ...transcriptViewport.slice(1)];
 		}
-		if (this.#hasJumpIndicator() && transcriptViewport.length > 0) {
+		if (this.#flash !== undefined && transcriptViewport.length > 0) {
+			transcriptViewport = [...transcriptViewport.slice(0, -1), this.#renderCentered(this.#flash.text)];
+		} else if (this.#hasJumpIndicator() && transcriptViewport.length > 0) {
 			const label = this.#hasNewActivity ? "● New activity · Back to bottom" : "↓ Back to bottom · Ctrl+End";
 			transcriptViewport = [...transcriptViewport.slice(0, -1), this.#renderCentered(label)];
 		}
@@ -316,6 +341,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			// (`set-clipboard on`) honor it.
 			if (this.#draggingSelection) {
 				this.#draggingSelection = false;
+				this.#stopAutoScroll();
 				this.#emitSelectionClipboard();
 				this.#selection = undefined;
 			}
@@ -360,21 +386,30 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			return true;
 		}
 
-		// Line selection over the transcript: press starts (or restarts) a
-		// selection on the content line under the pointer, a left-button drag
-		// extends it, release commits it to the clipboard. Anchored to content
-		// line indices so the selection survives scrolling while dragging.
-		const contentLine = this.#scrollView.getScrollOffset() + event.row;
-		const tailLine = this.#transcriptLines.length - 1 - contentLine;
+		// Character selection over the transcript: press plants an anchor on
+		// the glyph under the pointer, a left-button drag moves the head, and
+		// release commits the covered range to the clipboard. Anchors are
+		// tail-relative so the selection survives streaming appends; a quick
+		// second click selects the word, a third the whole line.
 		if (event.leftClick && event.row < this.#viewportHeight && event.col < scrollbarColumn) {
+			const point = this.#pointAt(event.row, event.col);
 			this.#draggingSelection = true;
 			this.#draggingScrollbar = false;
 			this.#search = undefined; // starting a selection leaves search mode
-			this.#selection = { start: Math.max(0, tailLine), end: Math.max(0, tailLine) };
+			const clicks = this.#multiClickCount(event);
+			this.#selection =
+				clicks >= 2 ? this.#multiClickSelection(point.line, event.col, clicks) : { anchor: point, head: point };
 			return true;
 		}
 		if (event.motion && (event.button & 3) === 0 && this.#draggingSelection) {
-			if (this.#selection) this.#selection.end = Math.max(0, tailLine);
+			this.#dragCol = event.col;
+			const row = Math.max(0, Math.min(this.#viewportHeight - 1, event.row));
+			if (this.#selection) this.#selection.head = this.#pointAt(row, event.col);
+			// Holding the drag against a viewport edge keeps scrolling so a
+			// selection can extend past one screen (upstream Pi).
+			if (event.row <= 0) this.#startAutoScroll(-1);
+			else if (event.row >= this.#viewportHeight - 1) this.#startAutoScroll(1);
+			else this.#stopAutoScroll();
 			return true;
 		}
 		// Mouse tracking is active while fullscreen owns the TTY. Consume idle
@@ -382,26 +417,115 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		return true;
 	}
 
-	/** Push the selected transcript lines (styled text stripped) to the client clipboard via OSC 52. */
+	/** The selection endpoints in screen order: [top, bottom] — the larger tail line is the upper row. */
+	#normalizedSelection(): [SelectionPoint, SelectionPoint] {
+		const { anchor, head } = this.#selection!;
+		return anchor.line > head.line || (anchor.line === head.line && anchor.unit <= head.unit)
+			? [anchor, head]
+			: [head, anchor];
+	}
+
+	/** Tail-relative anchor for a pointer position: line from the viewport row, unit from the visible column. */
+	#pointAt(viewportRow: number, visibleCol: number): SelectionPoint {
+		const contentLine = this.#scrollView.getScrollOffset() + viewportRow;
+		const tailLine = Math.max(0, this.#transcriptLines.length - 1 - contentLine);
+		const styled = this.#transcriptLines[this.#transcriptLines.length - 1 - tailLine];
+		return { line: tailLine, unit: styled === undefined ? 0 : pickCodeUnit(styled, visibleCol) };
+	}
+
+	/** Counts chained clicks at the same cell within 500ms (double → word, triple+ → line). */
+	#multiClickCount(event: SgrMouseEvent): number {
+		const now = performance.now();
+		const repeat =
+			this.#lastClick !== undefined &&
+			this.#lastClick.row === event.row &&
+			this.#lastClick.col === event.col &&
+			now - this.#lastClick.ms < 500;
+		const count = repeat ? this.#lastClick!.count + 1 : 1;
+		this.#lastClick = { ms: now, row: event.row, col: event.col, count };
+		return count;
+	}
+
+	#multiClickSelection(
+		tailLine: number,
+		visibleCol: number,
+		clicks: number,
+	): {
+		anchor: SelectionPoint;
+		head: SelectionPoint;
+	} {
+		const styled = this.#transcriptLines[this.#transcriptLines.length - 1 - tailLine] ?? "";
+		const text = stripVTControlCharacters(styled);
+		if (clicks >= 3) {
+			return { anchor: { line: tailLine, unit: 0 }, head: { line: tailLine, unit: text.length } };
+		}
+		// Double-click: the whitespace-delimited word under the pointer; / and -
+		// stay joined, matching terminal double-click selection.
+		const [start, end] = wordRangeAt(text, pickCodeUnit(styled, visibleCol));
+		return { anchor: { line: tailLine, unit: start }, head: { line: tailLine, unit: end } };
+	}
+
+	/** Push the selected transcript range (styled text stripped) to the client clipboard via OSC 52. */
 	#emitSelectionClipboard(): void {
 		if (this.#selection === undefined) return;
-		const start = Math.max(
-			0,
-			this.#transcriptLines.length - 1 - Math.max(this.#selection.start, this.#selection.end),
-		);
-		const end = Math.min(
-			this.#transcriptLines.length - 1,
-			this.#transcriptLines.length - 1 - Math.min(this.#selection.start, this.#selection.end),
-		);
-		if (end < start) return;
-		const text = this.#transcriptLines
-			.slice(start, end + 1)
-			.map(line => stripVTControlCharacters(line).trimEnd())
-			.join("\n");
+		const [top, bottom] = this.#normalizedSelection();
+		const lineAt = (tail: number) => this.#transcriptLines[this.#transcriptLines.length - 1 - tail];
+		const topText = stripVTControlCharacters(lineAt(top.line) ?? "");
+		const bottomText = stripVTControlCharacters(lineAt(bottom.line) ?? "");
+		const lines: string[] = [];
+		if (top.line === bottom.line) {
+			lines.push(topText.slice(top.unit, bottom.unit));
+		} else {
+			lines.push(topText.slice(top.unit));
+			for (let tail = top.line - 1; tail > bottom.line; tail--) {
+				lines.push(stripVTControlCharacters(lineAt(tail) ?? ""));
+			}
+			lines.push(bottomText.slice(0, bottom.unit));
+		}
+		// An anchor sitting at a line boundary contributes no text of its own.
+		while (lines.length > 1 && lines[0]!.trim().length === 0) lines.shift();
+		while (lines.length > 1 && lines[lines.length - 1]!.trim().length === 0) lines.pop();
+		const text = lines.map(line => line.trimEnd()).join("\n");
 		if (text.length === 0) return;
 		// OSC 52 payloads are base64; terminals cap them (tmux defaults to 256 KiB),
 		// which covers multi-screen selections comfortably.
 		this.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+		this.#showFlash(`Copied ${lines.length} line${lines.length === 1 ? "" : "s"}`);
+	}
+
+	/** Shows a transient copy confirmation on the last viewport row. */
+	#showFlash(text: string): void {
+		const durationMs = 1500;
+		this.#flash = { text, until: performance.now() + durationMs };
+		if (this.#flashTimer !== undefined) clearTimeout(this.#flashTimer);
+		this.#flashTimer = setTimeout(() => {
+			this.#flash = undefined;
+			this.#flashTimer = undefined;
+			this.requestRender();
+		}, durationMs);
+		this.requestRender();
+	}
+
+	#startAutoScroll(direction: number): void {
+		if (this.#autoScrollDir === direction && this.#autoScrollTimer !== undefined) return;
+		this.#stopAutoScroll();
+		this.#autoScrollDir = direction;
+		// Two rows per tick: fast enough to cross screens, slow enough to stop
+		// where intended while the pointer holds the edge.
+		this.#autoScrollTimer = setInterval(() => {
+			this.#scrollView.scroll(direction * 2);
+			if (this.#selection) {
+				this.#selection.head = this.#pointAt(direction < 0 ? 0 : this.#viewportHeight - 1, this.#dragCol);
+			}
+			this.#syncFollowTail();
+			this.requestRender();
+		}, 50);
+	}
+
+	#stopAutoScroll(): void {
+		if (this.#autoScrollTimer !== undefined) clearInterval(this.#autoScrollTimer);
+		this.#autoScrollTimer = undefined;
+		this.#autoScrollDir = 0;
 	}
 
 	#scrollToPointer(row: number): void {
@@ -495,4 +619,31 @@ export function highlightTranscriptRanges(line: string, ranges: readonly { start
 	}
 	if (highlighted) out += "\x1b[27m";
 	return out;
+}
+
+/** A character-selection anchor: tail-relative line + code-unit offset in the SGR-stripped line text. */
+export type SelectionPoint = { line: number; unit: number };
+
+/** Maps a visible column to a code-unit index in the SGR-stripped text of a styled line. */
+export function pickCodeUnit(line: string, visibleCol: number): number {
+	const text = stripVTControlCharacters(line);
+	let acc = 0;
+	let idx = 0;
+	for (const { segment } of segmenter.segment(text)) {
+		const width = visibleWidth(segment);
+		if (acc + width > visibleCol) break;
+		acc += width;
+		idx += segment.length;
+	}
+	return idx;
+}
+
+/** Word range [start, end) around idx: whitespace-delimited, / and - stay joined (terminal double-click). */
+export function wordRangeAt(text: string, idx: number): [number, number] {
+	const wordChar = (ch: string | undefined) => ch !== undefined && ch.trim().length > 0;
+	let start = idx;
+	while (wordChar(text[start - 1])) start--;
+	let end = idx;
+	while (wordChar(text[end])) end++;
+	return [start, end];
 }

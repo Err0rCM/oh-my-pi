@@ -1,4 +1,12 @@
 import { describe, expect, it } from "bun:test";
+
+function decodeOsc52(osc: string): string {
+	const marker = "\x1b]52;c;";
+	const start = osc.indexOf(marker);
+	if (start === -1) return "";
+	return Buffer.from(osc.slice(start + marker.length).replace(/\x07$/, ""), "base64").toString("utf8");
+}
+
 import {
 	FullscreenChatView,
 	findTranscriptMatches,
@@ -379,11 +387,15 @@ describe("FullscreenChatView", () => {
 
 		// viewport = 6 - 1 dock row = 5 rows; content 4 lines fits, scrollOffset 0.
 		view.render(12);
-		// Press on row 0, drag to row 2 (button 32 = left drag), release.
-		expect(view.handleViewportInput("\x1b[<0;2;1M")).toBe(true);
+		// Press at the tail of row 0, drag to the head of row 2 (button 32 =
+		// left drag), release: with character anchors this still covers the
+		// three full lines.
+		expect(view.handleViewportInput("\x1b[<0;1;1M")).toBe(true);
+		// A single press plants a zero-width anchor: no highlight yet.
+		expect(view.render(12)[0]).not.toContain("\x1b[7m");
+		expect(view.handleViewportInput("\x1b[<32;10;3M")).toBe(true);
 		const mid = view.render(12);
 		expect(mid[0]).toContain("\x1b[7m"); // selection highlight on the first line
-		expect(view.handleViewportInput("\x1b[<32;2;3M")).toBe(true);
 		expect(view.handleViewportInput("\x1b[<0;2;3m")).toBe(true);
 
 		expect(writes.length).toBe(1);
@@ -397,6 +409,112 @@ describe("FullscreenChatView", () => {
 		// The highlight clears on release right after the copy fires.
 		const after = view.render(12);
 		expect(after[0]).not.toContain("\x1b[7m");
+	});
+
+	it("double-click selects a word and triple-click the whole line", () => {
+		const transcript = new LinesComponent(["see /path/to/file now"]);
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const writes: string[] = [];
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 3,
+			() => editor,
+			data => writes.push(data),
+		);
+		view.render(20);
+
+		// Two presses on the same cell (col 7 lands inside "path"): the word
+		// "/path/to/file" survives — / is a joiner, not a boundary.
+		expect(view.handleViewportInput("\x1b[<0;7;1M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<0;7;1M")).toBe(true);
+		const word = view.render(20);
+		expect(word[0]).toContain("\x1b[7m/path/to/file\x1b[27m");
+		expect(view.handleViewportInput("\x1b[<0;7;1m")).toBe(true);
+		expect(decodeOsc52(writes[0] ?? "")).toBe("/path/to/file");
+
+		// A third press upgrades the selection to the entire line.
+		writes.length = 0;
+		expect(view.handleViewportInput("\x1b[<0;7;1M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<0;7;1M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<0;7;1M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<0;7;1m")).toBe(true);
+		expect(decodeOsc52(writes[0] ?? "")).toBe("see /path/to/file now");
+	});
+
+	it("copies a mid-line character range, not whole lines", () => {
+		const transcript = new LinesComponent(["the quick brown fox", "jumps over"]);
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const writes: string[] = [];
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 4,
+			() => editor,
+			data => writes.push(data),
+		);
+		view.render(20);
+
+		// Press before "q" (SGR col 5 → 0-based 4), drag past "brown" (col 16).
+		expect(view.handleViewportInput("\x1b[<0;5;1M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<32;16;1M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<0;6;1m")).toBe(true);
+		expect(decodeOsc52(writes[0] ?? "")).toBe("quick brown");
+	});
+
+	it("flashes a copy confirmation on the last viewport row after release", () => {
+		const transcript = new LinesComponent(Array.from({ length: 6 }, (_, i) => `line ${i + 1}`));
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 4,
+			() => editor,
+			() => {},
+		);
+		view.render(12);
+		expect(view.handleViewportInput("\x1b[<0;3;1M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<32;3;2M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<0;3;2m")).toBe(true);
+		expect(view.render(12)[2]).toContain("Copied 2 lines");
+	});
+
+	it("auto-scrolls the viewport while a drag holds the top edge", async () => {
+		const transcript = new LinesComponent(Array.from({ length: 30 }, (_, i) => `line ${i + 1}`));
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView(
+			[transcript],
+			[editorContainer],
+			editorContainer,
+			() => 4,
+			() => editor,
+			() => {},
+		);
+		view.render(12);
+		expect(view.handleViewportInput("\x1b[<0;3;3M")).toBe(true);
+		// Drag to the top edge and hold: the auto-scroll timer walks the
+		// viewport up ~2 rows per 50ms tick.
+		expect(view.handleViewportInput("\x1b[<32;3;1M")).toBe(true);
+		await new Promise(resolve => setTimeout(resolve, 160));
+		const scrolled = view.render(12).map(line => line.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ""));
+		// ~3 ticks fired in 160ms: 2 rows each from offset 27 → the top row is
+		// line 22 (it carries the highlight, since the drag head rides the edge).
+		expect(scrolled[0]).toContain("line 22");
+		// Release stops the scroll.
+		expect(view.handleViewportInput("\x1b[<0;3;1m")).toBe(true);
+		await new Promise(resolve => setTimeout(resolve, 120));
+		expect(view.render(12)[0].replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")).toContain("line 22");
 	});
 
 	it("does not start a selection from clicks on the editor rows", () => {
