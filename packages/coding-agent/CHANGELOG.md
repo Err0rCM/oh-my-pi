@@ -4,8 +4,14 @@
 
 ### Added
 
-- Fullscreen chat transcript selection: press and drag over the history to select lines (highlighted), release to push them to the client clipboard via OSC 52 (honored by most terminals and tmux with `set-clipboard on`); Shift-drag still defers to the terminal's native selection where supported.
+- Fullscreen chat character-level selection: press and drag over the history to select an exact range, release to push it to the client clipboard via OSC 52 (honored by most terminals and tmux with `set-clipboard on`); Shift-drag still defers to the terminal's native selection where supported. Double-click selects the word (`/` and `-` stay joined), a third click the whole line, and holding a drag against a viewport edge auto-scrolls.
 - The fullscreen chat mode now routes pointer clicks on the composer through `MouseRoutable` so tapping the editor positions the caret at the clicked glyph (phone SSH and desktop alike), instead of the click being silently consumed.
+- Transcript search in fullscreen: Ctrl+F opens a search bar over the first viewport row, filtering case-insensitively as you type; Enter/Shift+Enter cycle hits with wraparound and a N/M counter, each hit scrolls into the upper third of the viewport, and Esc closes.
+- A jump-to-latest indicator replaces the last viewport row while you are scrolled away — click it (or Ctrl+End) to return to the tail; it upgrades to a "New activity" label once content grows below the fold. Copies confirm with a transient "Copied N lines" chip.
+
+### Changed
+
+- Fullscreen viewport navigation follows upstream Pi and CC ergonomics: Home/End move the editor caret again (they were captured by the transcript viewport), the viewport scrolls on Ctrl+Home/Ctrl+End, page turns keep a 4-row overlap, and wheel scrolling accelerates with fling speed (Alt ×5).
 
 ## [18.0.10] - 2026-08-28
 

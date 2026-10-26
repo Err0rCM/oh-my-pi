@@ -10,6 +10,14 @@
 ### Added
 
 - `Editor.moveCursorToRenderedPosition` + `MouseRoutable` routing: hosts can translate a pointer click on rendered editor rows into a caret move (word-wrap aware, surrogate-pair safe, clamped to EOL).
+- `WheelScrollAccelerator`: speed-adaptive wheel scrolling for full-screen surfaces — a fling's dense event stream scales from 1 to 6 lines per event (sub-5ms bursts count as one notch), with `ALT_WHEEL_SCROLL_MULTIPLIER` for a jump. Timings mirror upstream Pi.
+- `colToCodeUnitIndex`: shared visible-column → UTF-16 code-unit mapping by grapheme walk (wide glyphs stop before the glyph, zero-width contribute no cells).
+
+### Changed
+
+- Fullscreen alt frames repaint per-row diffs: rows identical to the previous frame emit nothing, so a keystroke no longer rewrites the whole screen (visible as flicker on slow clients).
+- Fullscreen resizes under a multiplexer no longer repaint on a height shrink — tmux re-flows the pane bottom-anchored itself and a repaint would stack a second full-screen redraw (the mobile soft-keyboard flicker); a grow repaints once after the burst settles. Direct terminals always repaint.
+- SGR coalescing is disabled while running under tmux, whose synchronized-output handling drops reverse-video attributes from merged sequences.
 
 ## [18.0.10] - 2026-08-28
 
