@@ -773,7 +773,7 @@ export class TUI extends Container {
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
-	static readonly #ALT_RESIZE_SETTLE_MS = 120;
+	static readonly #ALT_RESIZE_SETTLE_MS = 300;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
 	static readonly #RESIZE_PROBE_TIMEOUT_MS = 200;
 	#inputRenderGraceUntilMs = 0;

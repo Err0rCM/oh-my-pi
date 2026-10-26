@@ -97,10 +97,10 @@ describe("alt-frame row-level diff", () => {
 		// painted once at the end instead of flashing per resize step.
 		term.writes.length = 0;
 		term.resize(40, 5);
-		await Bun.sleep(40);
+		await Bun.sleep(80); // within the settle window: same burst
 		term.resize(40, 4);
 		overlay.rows = ["中文第一行", "second row", "third row", "editor line"];
-		await Bun.sleep(300);
+		await Bun.sleep(500); // past the 300ms settle
 		await flushRender(term);
 
 		const repaints = term.writes.filter(write => write.includes("中文第一行"));
