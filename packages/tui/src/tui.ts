@@ -822,7 +822,8 @@ export class TUI extends Container {
 	// engine paints only the modal on the alt buffer and leaves every
 	// normal-screen accounting field (#previousFrameLength, #viewportTopRow, …)
 	// untouched, so exiting reconciles cleanly against the terminal-restored
-	// normal screen. #altPreviousLines is the last alt frame, for repaint-skip.
+	// normal screen. #altPreviousLines is the last alt frame, for whole-frame
+	// skip and per-row diffing (its length may lag a resize on purpose).
 	#altActive = false;
 	#altMouseTrackingActive = false;
 	#altPreviousLines: string[] = [];
@@ -1165,13 +1166,7 @@ export class TUI extends Container {
 		}
 		this.requestRender(true, { clearScrollback: options?.clearScrollback === true });
 	}
-	/**
-	 * Borrow the alternate buffer for stable, history-free resize repainting.
-	 * `restartingProbe` marks a transaction restarted by a SIGWINCH that
-	 * arrived while the settled anchor probe was in flight: the live window
-	 * was already stashed and emptied, so the snapshot below must be skipped
-	 * to keep the good stash.
-	 */
+
 	/**
 	 * While the fullscreen surface owns the alt screen, a resize repaints in
 	 * place (no borrow protocol), but a soft-keyboard animation delivers a
@@ -1206,6 +1201,13 @@ export class TUI extends Container {
 		}, TUI.#RESIZE_VIEWPORT_SETTLE_MS);
 	}
 
+	/**
+	 * Borrow the alternate buffer for stable, history-free resize repainting.
+	 * `restartingProbe` marks a transaction restarted by a SIGWINCH that
+	 * arrived while the settled anchor probe was in flight: the live window
+	 * was already stashed and emptied, so the snapshot below must be skipped
+	 * to keep the good stash.
+	 */
 	#beginResizeAltPaint(restartingProbe = false): void {
 		if (this.#altActive) {
 			this.#scheduleSettledAltResizeRender();
@@ -2993,12 +2995,14 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Full per-row viewport rewrite on the alt buffer. Emits only sync-output
+	 * Row-diffed repaint on the alt buffer: rows identical to the previous
+	 * frame keep their pixels and emit nothing. Emits only sync-output
 	 * brackets, a cursor home, and per-row rewrites — never ED3 or any
 	 * native-scrollback byte. The hardware cursor stays hidden unless the frame
 	 * carries a cursor marker (a focused editor inside e.g. the fullscreen chat
 	 * overlay); then it is parked on that position, inside the sync-output
-	 * bracket so hide→paint→position→show presents as one atomic frame.
+	 * bracket so hide→paint→position→show presents as one atomic frame (the
+	 * identical-frame skip path writes the cursor sequence bare).
 	 */
 	#emitAltFrame(
 		lines: string[],
@@ -3020,13 +3024,18 @@ export class TUI extends Container {
 			for (const seq of imageTransmits) transmitBuffer += seq;
 			this.terminal.write(transmitBuffer);
 		}
+		const force = this.#forceViewportRepaintOnNextRender;
+		this.#forceViewportRepaintOnNextRender = false;
+		// No length gate on the diff: a height-only resize (a soft keyboard
+		// shrinking the window) keeps every row's content, so the diff skips
+		// them and only the rows appearing or disappearing at the edge get
+		// repainted.
+		const rowDiff = !force && this.#altPreviousLines.length > 0;
 		// Skip an identical repaint (the modal is mostly static between
 		// keystrokes) — unless a forced repaint (resetDisplay,
 		// requestRender(true)) is pending: the redraw gesture must repair a
 		// corrupted modal even when our cached frame is byte-identical.
-		const force = this.#forceViewportRepaintOnNextRender;
-		this.#forceViewportRepaintOnNextRender = false;
-		if (!force && this.#altPreviousLines.length === height) {
+		if (rowDiff && this.#altPreviousLines.length === height) {
 			let same = true;
 			for (let r = 0; r < height; r++) {
 				if (fitted[r] !== this.#altPreviousLines[r]) {
@@ -3040,16 +3049,11 @@ export class TUI extends Container {
 			// re-hide it when this frame carries no marker, so a cursor left
 			// visible by a previous frame cannot linger at a stale position.
 			if (same) {
-				const parked = this.#altCursorSequence(markers?.[0], width, height);
-				if (parked) this.terminal.write(parked);
+				this.terminal.write(this.#altCursorSequence(this.#altCursorTarget(markers?.[0], width, height)));
 				return;
 			}
 		}
 		let buffer = `${this.#paintBeginSequence}\x1b[H`;
-		// No length gate: a height-only resize (a soft keyboard shrinking the
-		// window) keeps every row's content, so the diff skips them and only
-		// the rows appearing or disappearing at the edge get repainted.
-		const rowDiff = !force && this.#altPreviousLines.length > 0;
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\r\n";
 			// Row-level diff: an identical row keeps its pixels without any
@@ -3061,7 +3065,7 @@ export class TUI extends Container {
 			if (rowDiff && this.#altPreviousLines[r] === fitted[r]) continue;
 			buffer += this.#lineRewriteSequence(fitted[r], width, r, -1, -1, this.#osc66SpacerGlyphWidth(fitted, r));
 		}
-		buffer += this.#altCursorSequence(markers?.[0], width, height);
+		buffer += this.#altCursorSequence(this.#altCursorTarget(markers?.[0], width, height));
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#altPreviousLines = fitted;
@@ -3097,8 +3101,7 @@ export class TUI extends Container {
 	 * allows. Without a marker: hide, so the cursor never lingers visible at a
 	 * stale position after the focused editor disappeared from the frame.
 	 */
-	#altCursorSequence(marker: { row: number; col: number } | undefined, width: number, height: number): string {
-		const target = this.#altCursorTarget(marker, width, height);
+	#altCursorSequence(target: HardwareCursorState | null): string {
 		if (target === null) return "\x1b[?25l";
 		return `\x1b[${target.row + 1};${target.col + 1}H${target.visible ? "\x1b[?25h" : "\x1b[?25l"}`;
 	}

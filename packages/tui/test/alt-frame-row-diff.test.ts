@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
+import { flushRender } from "./helpers/flush-render";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -30,12 +31,6 @@ class RowsComponent implements Component {
 	render(): readonly string[] {
 		return this.rows;
 	}
-}
-
-async function flushRender(term: VirtualTerminal): Promise<void> {
-	await new Promise<void>(resolve => process.nextTick(resolve));
-	await Bun.sleep(40);
-	await term.flush();
 }
 
 describe("alt-frame row-level diff", () => {
@@ -101,7 +96,7 @@ describe("alt-frame row-level diff", () => {
 		await Bun.sleep(80); // within the settle window: same burst
 		term.resize(40, 4);
 		overlay.rows = ["中文第一行", "second row", "third row", "editor line"];
-		await Bun.sleep(500); // past the 300ms settle
+		await Bun.sleep(500); // well past the 120ms settle
 		await flushRender(term);
 
 		const repaints = term.writes.filter(write => write.includes("中文第一行"));

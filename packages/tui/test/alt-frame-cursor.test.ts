@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { type Component, CURSOR_MARKER, type Focusable, TUI } from "@oh-my-pi/pi-tui";
+import { flushRender } from "./helpers/flush-render";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -23,12 +24,6 @@ class CaretMarkerComponent implements Component, Focusable {
 		const marker = this.focused ? CURSOR_MARKER : "";
 		return [`${this.#text.slice(0, this.#col)}${marker}${this.#text.slice(this.#col)}`];
 	}
-}
-
-async function flushRender(term: VirtualTerminal): Promise<void> {
-	await new Promise<void>(resolve => process.nextTick(resolve));
-	await Bun.sleep(40);
-	await term.flush();
 }
 
 describe("alt-frame hardware cursor parking", () => {

@@ -15,6 +15,7 @@ import type { SgrMouseEvent } from "../mouse";
 import type { SymbolTheme } from "../symbols";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import {
+	colToCodeUnitIndex,
 	getSegmenter,
 	getWidthConfigEpoch,
 	getWordNavKind,
@@ -2008,21 +2009,9 @@ export class Editor implements Component, Focusable {
 		const textStartCol = chrome + visibleWidth(gutterText);
 		const textCol = col - textStartCol;
 		if (textCol < 0) return false; // clicked the gutter or side chrome
-		// Invert the column-width mapping: walk the layout text by grapheme
-		// accumulating cell widths (zero-width glyphs contribute none), and
-		// accumulate the caret offset in UTF-16 code units, the coordinate
-		// cursorCol uses. A click on either cell of a wide glyph stops before
-		// the glyph — that is deliberate: stopping after its left half could
-		// be misread as a caret inside a surrogate-free but visually split
-		// cell, and every emitter of cursorCol treats text as UTF-16 slices.
-		let acc = 0;
-		let idx = 0;
-		for (const { segment: ch } of segmenter.segment(layout.text)) {
-			const w = visibleWidth(ch);
-			if (acc + w > textCol) break;
-			acc += w;
-			idx += ch.length;
-		}
+		// Invert the column-width mapping (see colToCodeUnitIndex for the
+		// wide-glyph and zero-width semantics).
+		const idx = colToCodeUnitIndex(layout.text, textCol);
 		this.#state.cursorLine = layout.sourceLine;
 		this.#setCursorCol(layout.sourceStartCol + idx);
 		this.#updateScrollOffset(layoutWidth, layoutLines, visibleHeight);

@@ -33,7 +33,7 @@ describe("Editor.moveCursorToRenderedPosition", () => {
 		expect(editor.moveCursorToRenderedPosition(row, col)).toBe(true);
 		const cursor = editor.getCursor();
 		expect(cursor.line).toBe(0);
-		expect(cursor.col).toBe(8); // between "world" and " test"… "hello wo|rld"
+		expect(cursor.col).toBe(8); // "hello wo|rld"
 	});
 
 	it("keeps surrogate pairs intact when clicking past an emoji (UTF-16 caret math)", () => {

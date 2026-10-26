@@ -3,8 +3,8 @@ import {
 	ALT_WHEEL_SCROLL_MULTIPLIER,
 	type Component,
 	type Container,
+	colToCodeUnitIndex,
 	Ellipsis,
-	getSegmenter,
 	type MouseRoutable,
 	matchesKey,
 	type OverlayFocusOwner,
@@ -14,8 +14,6 @@ import {
 	visibleWidth,
 	WheelScrollAccelerator,
 } from "@oh-my-pi/pi-tui";
-
-const segmenter = getSegmenter();
 
 /**
  * Muted chip colors for overlay rows (search bar, jump indicator, copy
@@ -618,7 +616,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 }
 
 /** One literal query hit: [start, end) into the SGR-stripped line text (UTF-16 code units). */
-export type TranscriptMatch = { line: number; start: number; end: number };
+type TranscriptMatch = { line: number; start: number; end: number };
 
 /** Find literal case-insensitive query hits across SGR-stripped transcript lines. */
 export function findTranscriptMatches(lines: readonly string[], query: string): TranscriptMatch[] {
@@ -702,24 +700,15 @@ export function highlightTranscriptRanges(line: string, ranges: readonly { start
 }
 
 /** A character-selection anchor: tail-relative line + code-unit offset in the SGR-stripped line text. */
-export type SelectionPoint = { line: number; unit: number };
+type SelectionPoint = { line: number; unit: number };
 
 /** Maps a visible column to a code-unit index in the SGR-stripped text of a styled line. */
-export function pickCodeUnit(line: string, visibleCol: number): number {
-	const text = stripVTControlCharacters(line);
-	let acc = 0;
-	let idx = 0;
-	for (const { segment } of segmenter.segment(text)) {
-		const width = visibleWidth(segment);
-		if (acc + width > visibleCol) break;
-		acc += width;
-		idx += segment.length;
-	}
-	return idx;
+function pickCodeUnit(line: string, visibleCol: number): number {
+	return colToCodeUnitIndex(stripVTControlCharacters(line), visibleCol);
 }
 
 /** Word range [start, end) around idx: whitespace-delimited, / and - stay joined (terminal double-click). */
-export function wordRangeAt(text: string, idx: number): [number, number] {
+function wordRangeAt(text: string, idx: number): [number, number] {
 	const wordChar = (ch: string | undefined) => ch !== undefined && ch.trim().length > 0;
 	let start = idx;
 	while (wordChar(text[start - 1])) start--;
