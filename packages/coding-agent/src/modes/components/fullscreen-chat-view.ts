@@ -18,6 +18,14 @@ import {
 const segmenter = getSegmenter();
 
 /**
+ * Muted chip colors for overlay rows (search bar, jump indicator, copy
+ * flash). Reverse video would swap to a white slab on dark terminals; a dim
+ * gray background with light gray text stays quiet on dark and light themes.
+ */
+const CHIP_BG = "\x1b[48;5;236m";
+const CHIP_FG = "\x1b[38;5;250m";
+
+/**
  * Persistent alternate-screen chat surface.
  *
  * The regular OMP root remains the source of truth for every existing
@@ -240,14 +248,17 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		const count = search.matches.length === 0 ? "no matches" : `${search.current + 1}/${search.matches.length}`;
 		const label = ` find: ${search.query}▏  ${count} · Enter↓ ⇧Enter↑ · Esc`;
 		const padding = Math.max(0, this.#width - visibleWidth(label));
-		return `\x1b[7m${label}${" ".repeat(padding)}\x1b[0m`;
+		// Muted chip instead of reverse video: reverse swaps to a full-width
+		// white slab on dark themes — loud and jarring. A dim 256-color gray
+		// reads on both dark and light terminals.
+		return `${CHIP_BG}${CHIP_FG}${label}${" ".repeat(padding)}\x1b[0m`;
 	}
 
 	#renderCentered(label: string): string {
-		const text = ` ${label} `;
+		const text = `  ${label}  `;
 		const padding = Math.max(0, this.#width - visibleWidth(text));
 		const left = Math.floor(padding / 2);
-		return `\x1b[7m${" ".repeat(left)}${text}${" ".repeat(padding - left)}\x1b[0m`;
+		return `${" ".repeat(left)}${CHIP_BG}${CHIP_FG}${text}\x1b[0m${" ".repeat(padding - left)}`;
 	}
 
 	/** Recomputes tail-following from the scroll position; landing on the tail also clears activity. */
