@@ -25,13 +25,37 @@ const segmenter = getSegmenter();
 const CHIP_BG = "\x1b[48;5;236m";
 const CHIP_FG = "\x1b[38;5;250m";
 
+export interface FullscreenChatViewOptions {
+	/** Transcript components: the history that scrolls independently of the dock. */
+	transcript: readonly Component[];
+	/** Dock components pinned to the bottom: pending messages, status, editor, footer. */
+	dock: readonly Component[];
+	/** Container whose focused child owns the keyboard while fullscreen is up. */
+	editorContainer: Container;
+	/** Terminal height in rows, polled on each render. */
+	terminalRows: () => number;
+	/**
+	 * Resolved at click time: the editor slot can be hot-swapped while
+	 * fullscreen is up (approval prompts, visualizers), and a stale captured
+	 * instance would silently route clicks into an unmounted instance.
+	 */
+	editor: () => Component & MouseRoutable;
+	/** Raw terminal write for one-shot sequences that must not race a frame (OSC 52 clipboard push). */
+	write: (data: string) => void;
+	/** Asks the host for a re-render; drives drag auto-scroll and copy-flash timers. */
+	requestRender?: () => void;
+}
+
 /**
  * Persistent alternate-screen chat surface.
  *
  * The regular OMP root remains the source of truth for every existing
- * transcript, status, hook, and editor component. This view only gives those
+ * transcript, status, hook, and editor component. This view gives those
  * components a viewport: history scrolls independently while the live dock
- * stays fixed at the bottom of the terminal.
+ * stays fixed at the bottom of the terminal. On top of that viewport it owns
+ * the fullscreen-only text interactions: speed-adaptive wheel scrolling,
+ * click-to-position routing into the composer, character-level selection with
+ * OSC 52 copy, transcript search, and the jump-to-latest indicator.
  */
 export class FullscreenChatView implements Component, OverlayFocusOwner {
 	#scrollView = new ScrollView([], { height: 1, scrollbar: "auto", ellipsis: Ellipsis.Omit });
@@ -56,7 +80,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	/** Column of the last drag motion, so auto-scroll extends the head at the pointer's column. */
 	#dragCol = 0;
 	/** Transient copy feedback replacing the last viewport row for a moment. */
-	#flash: { text: string; until: number } | undefined;
+	#flash: { text: string } | undefined;
 	#flashTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Un-styled transcript lines from the last render, backing selection copy. */
 	#transcriptLines: readonly string[] = [];
@@ -69,25 +93,42 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	/** Active transcript search: typed query plus its literal matches and cursor. */
 	#search: { query: string; matches: TranscriptMatch[]; current: number } | undefined;
 
-	constructor(
-		private readonly transcriptComponents: readonly Component[],
-		private readonly dockComponents: readonly Component[],
-		private readonly editorContainer: Container,
-		private readonly terminalRows: () => number,
-		/** Resolved at click time: the editor slot can be hot-swapped while fullscreen is up (approval prompts, visualizers), and a stale captured instance would silently route clicks into an unmounted instance. */
-		private readonly editor: () => Component & MouseRoutable,
-		/** Raw terminal write for one-shot sequences that must not race a frame (OSC 52 clipboard push). */
-		private readonly write: (data: string) => void,
-		/** Asks the host for a re-render; drives drag auto-scroll and copy-flash timers. */
-		private readonly requestRender: () => void = () => {},
-	) {}
+	constructor(private readonly options: FullscreenChatViewOptions) {}
+
+	get transcriptComponents(): readonly Component[] {
+		return this.options.transcript;
+	}
+
+	get dockComponents(): readonly Component[] {
+		return this.options.dock;
+	}
+
+	get editorContainer(): Container {
+		return this.options.editorContainer;
+	}
+
+	get terminalRows(): () => number {
+		return this.options.terminalRows;
+	}
+
+	get editor(): () => Component & MouseRoutable {
+		return this.options.editor;
+	}
+
+	get write(): (data: string) => void {
+		return this.options.write;
+	}
+
+	get requestRender(): () => void {
+		return this.options.requestRender ?? (() => {});
+	}
 
 	/** Lets the normal editor slot keep keyboard focus while this overlay owns the screen. */
 	ownsOverlayFocusTarget(component: Component): boolean {
 		return this.editorContainer.children.includes(component);
 	}
 
-	/** True when a viewport navigation key or mouse gesture changed the scroll position. */
+	/** True when the fullscreen surface consumed the input: navigation keys, the search bar, selection gestures, or composer-click routing. */
 	handleViewportInput(data: string): boolean {
 		const mouse = parseSgrMouse(data);
 		if (mouse) return this.#handleMouse(mouse);
@@ -195,24 +236,9 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			this.#selection === undefined && this.#search === undefined
 				? [...transcriptLines]
 				: transcriptLines.map((line, index) => {
-						if (this.#selection !== undefined) {
-							const tail = transcriptLines.length - 1 - index;
-							const [top, bottom] = this.#normalizedSelection();
-							if (tail <= top.line && tail >= bottom.line) {
-								const length = stripVTControlCharacters(line).length;
-								const startUnit = tail === top.line ? top.unit : 0;
-								const endUnit = tail === bottom.line ? bottom.unit : length;
-								if (endUnit > startUnit) {
-									return highlightTranscriptRanges(line, [{ start: startUnit, end: endUnit }]);
-								}
-							}
-							return line;
-						}
-						const ranges = this.#search!.matches.filter(match => match.line === index).map(match => ({
-							start: match.start,
-							end: match.end,
-						}));
-						return highlightTranscriptRanges(line, ranges);
+						const ranges =
+							this.#selection !== undefined ? this.#selectionRangesFor(index) : this.#searchRangesFor(index);
+						return ranges.length > 0 ? highlightTranscriptRanges(line, ranges) : line;
 					}),
 		);
 		if (this.#followTail) this.#scrollView.scrollToBottom();
@@ -243,22 +269,51 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		return !this.#followTail;
 	}
 
+	/** Tail-relative index of absolute transcript line `index`. */
+	#tailOf(index: number): number {
+		return this.#transcriptLines.length - 1 - index;
+	}
+
+	/** Styled transcript line at tail-relative index `tail`. */
+	#styledLineAtTail(tail: number): string | undefined {
+		return this.#transcriptLines[this.#tailOf(tail)];
+	}
+
+	/** Reverse-video ranges covering the active selection on absolute line `index`. */
+	#selectionRangesFor(index: number): { start: number; end: number }[] {
+		if (this.#selection === undefined) return [];
+		const tail = this.#tailOf(index);
+		const [first, last] = this.#normalizedSelection();
+		if (tail > first.line || tail < last.line) return [];
+		const length = stripVTControlCharacters(this.#transcriptLines[index] ?? "").length;
+		const start = tail === first.line ? first.unit : 0;
+		const end = tail === last.line ? last.unit : length;
+		return end > start ? [{ start, end }] : [];
+	}
+
+	/** Reverse-video ranges covering the active search hits on absolute line `index`. */
+	#searchRangesFor(index: number): { start: number; end: number }[] {
+		if (this.#search === undefined) return [];
+		return this.#search.matches
+			.filter(match => match.line === index)
+			.map(match => ({ start: match.start, end: match.end }));
+	}
+
+	/** A muted chip row: left-aligned filling the row, or centered hugging its label. */
+	#renderChipRow(text: string, center: boolean): string {
+		const padding = Math.max(0, this.#width - visibleWidth(text));
+		const left = center ? Math.floor(padding / 2) : 0;
+		return `${" ".repeat(left)}${CHIP_BG}${CHIP_FG}${text}\x1b[0m${" ".repeat(padding - left)}`;
+	}
+
 	#renderSearchBar(): string {
 		const search = this.#search!;
 		const count = search.matches.length === 0 ? "no matches" : `${search.current + 1}/${search.matches.length}`;
-		const label = ` find: ${search.query}▏  ${count} · Enter↓ ⇧Enter↑ · Esc`;
-		const padding = Math.max(0, this.#width - visibleWidth(label));
-		// Muted chip instead of reverse video: reverse swaps to a full-width
-		// white slab on dark themes — loud and jarring. A dim 256-color gray
-		// reads on both dark and light terminals.
-		return `${CHIP_BG}${CHIP_FG}${label}${" ".repeat(padding)}\x1b[0m`;
+		return this.#renderChipRow(` find: ${search.query}▏  ${count} · Enter↓ ⇧Enter↑ · Esc`, false);
 	}
 
 	#renderCentered(label: string): string {
-		const text = `  ${label}  `;
-		const padding = Math.max(0, this.#width - visibleWidth(text));
-		const left = Math.floor(padding / 2);
-		return `${" ".repeat(left)}${CHIP_BG}${CHIP_FG}${text}\x1b[0m${" ".repeat(padding - left)}`;
+		return this.#renderChipRow(`  ${label}  `, true);
 	}
 
 	/** Recomputes tail-following from the scroll position; landing on the tail also clears activity. */
@@ -346,10 +401,10 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		if (event.release) {
 			this.#draggingScrollbar = false;
 			// A finished drag over the transcript commits the selection: push the
-			// covered lines to the client clipboard via OSC 52 (the only clipboard
-			// that reaches the user over SSH) and keep the highlight until the
-			// next press. Requires client support: most terminals and tmux
-			// (`set-clipboard on`) honor it.
+			// covered character range to the client clipboard via OSC 52 (the only
+			// clipboard that reaches the user over SSH) and clear the highlight —
+			// the transient "Copied N lines" chip confirms it landed. Requires
+			// client support: most terminals and tmux (`set-clipboard on`) honor it.
 			if (this.#draggingSelection) {
 				this.#draggingSelection = false;
 				this.#stopAutoScroll();
@@ -361,60 +416,10 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			return true;
 		}
 
-		// Click into the editor's rows: forward through the MouseRoutable
-		// contract with frame-local coordinates so the editor can position its
-		// caret at the clicked glyph (click-to-position, CC-style). The editor
-		// rows and the scrollbar column live in disjoint row ranges (dock vs
-		// viewport), so this and the scrollbar-drag path never compete.
-		if (event.leftClick && this.#editorDockRows !== undefined && event.row >= this.#viewportHeight) {
-			const dockRow = event.row - this.#viewportHeight;
-			if (dockRow >= this.#editorDockRows.top && dockRow < this.#editorDockRows.top + this.#editorDockRows.count) {
-				this.#search = undefined; // clicking into the composer leaves search mode
-				this.editor().routeMouse(event, dockRow - this.#editorDockRows.top, event.col);
-				return true;
-			}
-		}
-
-		const scrollbarColumn = this.#width - 1;
-		// Clicking the jump-to-latest indicator returns to the tail instead of
-		// starting a selection; the indicator only replaces the last viewport
-		// row while the user is scrolled away, so it cannot shadow content —
-		// but it must still leave that row's scrollbar column to the scrollbar.
-		if (
-			event.leftClick &&
-			this.#hasJumpIndicator() &&
-			event.row === this.#viewportHeight - 1 &&
-			event.col < scrollbarColumn
-		) {
-			this.#scrollView.scrollToBottom();
-			this.#syncFollowTail();
-			return true;
-		}
-		if (event.leftClick && event.col === scrollbarColumn && event.row < this.#viewportHeight) {
-			this.#draggingScrollbar = true;
-			this.#draggingSelection = false;
-			this.#selection = undefined;
-			this.#scrollToPointer(event.row);
-			return true;
-		}
+		// Drags keep tracking the pointer across the whole screen, so both
+		// motion handlers run before the row is classified below.
 		if (event.motion && this.#draggingScrollbar) {
 			this.#scrollToPointer(event.row);
-			return true;
-		}
-
-		// Character selection over the transcript: press plants an anchor on
-		// the glyph under the pointer, a left-button drag moves the head, and
-		// release commits the covered range to the clipboard. Anchors are
-		// tail-relative so the selection survives streaming appends; a quick
-		// second click selects the word, a third the whole line.
-		if (event.leftClick && event.row < this.#viewportHeight && event.col < scrollbarColumn) {
-			const point = this.#pointAt(event.row, event.col);
-			this.#draggingSelection = true;
-			this.#draggingScrollbar = false;
-			this.#search = undefined; // starting a selection leaves search mode
-			const clicks = this.#multiClickCount(event);
-			this.#selection =
-				clicks >= 2 ? this.#multiClickSelection(point.line, event.col, clicks) : { anchor: point, head: point };
 			return true;
 		}
 		if (event.motion && (event.button & 3) === 0 && this.#draggingSelection) {
@@ -428,12 +433,70 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			else this.#stopAutoScroll();
 			return true;
 		}
+
+		if (event.row >= this.#viewportHeight) {
+			// Dock rows: a click on the editor's rows routes through the
+			// MouseRoutable contract (click-to-position, CC-style); everything
+			// else is consumed so the sequences never reach the editor.
+			this.#routeEditorClick(event);
+			return true;
+		}
+
+		// Viewport rows, in precedence order: jump-to-latest indicator, then
+		// the scrollbar column, then text selection. The indicator only
+		// replaces the last viewport row while the user is scrolled away, so
+		// it cannot shadow content — but it leaves that row's scrollbar
+		// column to the scrollbar.
+		const scrollbarColumn = this.#width - 1;
+		if (
+			event.leftClick &&
+			this.#hasJumpIndicator() &&
+			event.row === this.#viewportHeight - 1 &&
+			event.col < scrollbarColumn
+		) {
+			this.#scrollView.scrollToBottom();
+			this.#syncFollowTail();
+			return true;
+		}
+		if (event.leftClick && event.col === scrollbarColumn) {
+			this.#draggingScrollbar = true;
+			this.#draggingSelection = false;
+			this.#selection = undefined;
+			this.#scrollToPointer(event.row);
+			return true;
+		}
+		// Character selection: press plants an anchor on the glyph under the
+		// pointer; a quick second click selects the word, a third the line.
+		if (event.leftClick && event.col < scrollbarColumn) {
+			const point = this.#pointAt(event.row, event.col);
+			this.#draggingSelection = true;
+			this.#draggingScrollbar = false;
+			this.#search = undefined; // starting a selection leaves search mode
+			const clicks = this.#multiClickCount(event);
+			this.#selection =
+				clicks >= 2 ? this.#multiClickSelection(point.line, event.col, clicks) : { anchor: point, head: point };
+			return true;
+		}
 		// Mouse tracking is active while fullscreen owns the TTY. Consume idle
 		// motion and clicks so their escape sequences never enter the editor.
 		return true;
 	}
 
-	/** The selection endpoints in screen order: [top, bottom] — the larger tail line is the upper row. */
+	/** Forwards a dock-area click into the editor with frame-local coordinates; other dock rows are simply consumed. */
+	#routeEditorClick(event: SgrMouseEvent): void {
+		if (!event.leftClick || this.#editorDockRows === undefined) return;
+		const dockRow = event.row - this.#viewportHeight;
+		if (dockRow < this.#editorDockRows.top || dockRow >= this.#editorDockRows.top + this.#editorDockRows.count) {
+			return;
+		}
+		this.#search = undefined; // clicking into the composer leaves search mode
+		this.editor().routeMouse(event, dockRow - this.#editorDockRows.top, event.col);
+	}
+
+	/**
+	 * The selection endpoints in copy order [first, last] — first is the upper
+	 * row on screen, which is the *larger* tail index (tail 0 = last line).
+	 */
 	#normalizedSelection(): [SelectionPoint, SelectionPoint] {
 		const { anchor, head } = this.#selection!;
 		return anchor.line > head.line || (anchor.line === head.line && anchor.unit <= head.unit)
@@ -443,9 +506,11 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 	/** Tail-relative anchor for a pointer position: line from the viewport row, unit from the visible column. */
 	#pointAt(viewportRow: number, visibleCol: number): SelectionPoint {
-		const contentLine = this.#scrollView.getScrollOffset() + viewportRow;
-		const tailLine = Math.max(0, this.#transcriptLines.length - 1 - contentLine);
-		const styled = this.#transcriptLines[this.#transcriptLines.length - 1 - tailLine];
+		// Clamp rows beyond the content end to its last line (a drag can cross
+		// into the dock area).
+		const contentLine = Math.min(this.#scrollView.getScrollOffset() + viewportRow, this.#transcriptLines.length - 1);
+		const tailLine = this.#tailOf(contentLine);
+		const styled = this.#styledLineAtTail(tailLine);
 		return { line: tailLine, unit: styled === undefined ? 0 : pickCodeUnit(styled, visibleCol) };
 	}
 
@@ -484,19 +549,18 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	/** Push the selected transcript range (styled text stripped) to the client clipboard via OSC 52. */
 	#emitSelectionClipboard(): void {
 		if (this.#selection === undefined) return;
-		const [top, bottom] = this.#normalizedSelection();
-		const lineAt = (tail: number) => this.#transcriptLines[this.#transcriptLines.length - 1 - tail];
-		const topText = stripVTControlCharacters(lineAt(top.line) ?? "");
-		const bottomText = stripVTControlCharacters(lineAt(bottom.line) ?? "");
+		const [first, last] = this.#normalizedSelection();
+		const firstText = stripVTControlCharacters(this.#styledLineAtTail(first.line) ?? "");
+		const lastText = stripVTControlCharacters(this.#styledLineAtTail(last.line) ?? "");
 		const lines: string[] = [];
-		if (top.line === bottom.line) {
-			lines.push(topText.slice(top.unit, bottom.unit));
+		if (first.line === last.line) {
+			lines.push(firstText.slice(first.unit, last.unit));
 		} else {
-			lines.push(topText.slice(top.unit));
-			for (let tail = top.line - 1; tail > bottom.line; tail--) {
-				lines.push(stripVTControlCharacters(lineAt(tail) ?? ""));
+			lines.push(firstText.slice(first.unit));
+			for (let tail = first.line - 1; tail > last.line; tail--) {
+				lines.push(stripVTControlCharacters(this.#styledLineAtTail(tail) ?? ""));
 			}
-			lines.push(bottomText.slice(0, bottom.unit));
+			lines.push(lastText.slice(0, last.unit));
 		}
 		// An anchor sitting at a line boundary contributes no text of its own.
 		while (lines.length > 1 && lines[0]!.trim().length === 0) lines.shift();
@@ -512,7 +576,7 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	/** Shows a transient copy confirmation on the last viewport row. */
 	#showFlash(text: string): void {
 		const durationMs = 1500;
-		this.#flash = { text, until: performance.now() + durationMs };
+		this.#flash = { text };
 		if (this.#flashTimer !== undefined) clearTimeout(this.#flashTimer);
 		this.#flashTimer = setTimeout(() => {
 			this.#flash = undefined;

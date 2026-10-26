@@ -96,14 +96,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[status, editorContainer],
-			editorContainer,
-			() => 6,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [status, editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 6,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		const initial = view.render(12);
 		expect(initial[0]).toContain("message-7");
@@ -132,14 +132,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[status, editorContainer],
-			editorContainer,
-			() => 6,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [status, editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 6,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		const rendered = view.render(12);
 		expect(rendered.slice(0, 4).some(line => line.includes("…"))).toBe(false);
@@ -151,14 +151,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[status, editorContainer],
-			editorContainer,
-			() => 6,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [status, editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 6,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		view.render(12);
 		// Leave the tail so the Ctrl+Home/End jumps below are observable.
@@ -181,14 +181,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 6,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 6,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		view.render(12);
 		// Wheel up must be consumed by the viewport regardless of how many lines
@@ -203,14 +203,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 6,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 6,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		// Following the tail: no indicator, the last viewport row is content.
 		const following = view.render(12);
@@ -247,14 +247,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 8,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 8,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		view.render(12);
 		// Ctrl+F opens the bar over the first viewport row.
@@ -283,14 +283,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 8,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 8,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		view.render(12);
 		expect(view.handleViewportInput("\x06")).toBe(true);
@@ -316,14 +316,14 @@ describe("FullscreenChatView", () => {
 		const editor = new RoutableEditor();
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 6,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 6,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		const rendered = view.render(12);
 		const editorRow = rendered.findIndex(line => line.includes("editor-line"));
@@ -354,14 +354,14 @@ describe("FullscreenChatView", () => {
 		// terminalRows=1 forces the dock to truncate to a single row (the editor
 		// tail survives only if it is the last row; with the editor first it is
 		// cut away entirely).
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 1,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 1,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		view.render(12);
 		for (let row = 0; row < 3; row++) {
@@ -376,14 +376,14 @@ describe("FullscreenChatView", () => {
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
 		const writes: string[] = [];
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 6,
-			() => editor,
-			data => writes.push(data),
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 6,
+			editor: () => editor,
+			write: data => writes.push(data),
+		});
 
 		// viewport = 6 - 1 dock row = 5 rows; content 4 lines fits, scrollOffset 0.
 		view.render(12);
@@ -417,14 +417,14 @@ describe("FullscreenChatView", () => {
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
 		const writes: string[] = [];
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 3,
-			() => editor,
-			data => writes.push(data),
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 3,
+			editor: () => editor,
+			write: data => writes.push(data),
+		});
 		view.render(20);
 
 		// Two presses on the same cell (col 7 lands inside "path"): the word
@@ -451,14 +451,14 @@ describe("FullscreenChatView", () => {
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
 		const writes: string[] = [];
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 4,
-			() => editor,
-			data => writes.push(data),
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 4,
+			editor: () => editor,
+			write: data => writes.push(data),
+		});
 		view.render(20);
 
 		// Press before "q" (SGR col 5 → 0-based 4), drag past "brown" (col 16).
@@ -473,14 +473,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 4,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 4,
+			editor: () => editor,
+			write: () => {},
+		});
 		view.render(12);
 		expect(view.handleViewportInput("\x1b[<0;3;1M")).toBe(true);
 		expect(view.handleViewportInput("\x1b[<32;3;2M")).toBe(true);
@@ -493,14 +493,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 4,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 4,
+			editor: () => editor,
+			write: () => {},
+		});
 		view.render(12);
 		expect(view.handleViewportInput("\x1b[<0;3;3M")).toBe(true);
 		// Drag to the top edge and hold: the auto-scroll timer walks the
@@ -523,14 +523,14 @@ describe("FullscreenChatView", () => {
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
 		const writes: string[] = [];
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 3,
-			() => editor,
-			data => writes.push(data),
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 3,
+			editor: () => editor,
+			write: data => writes.push(data),
+		});
 
 		const rendered = view.render(12);
 		const editorRow = rendered.findIndex(line => line.includes("editor"));
@@ -544,14 +544,14 @@ describe("FullscreenChatView", () => {
 		const editor = new LinesComponent(["editor"]);
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
-		const view = new FullscreenChatView(
-			[transcript],
-			[editorContainer],
-			editorContainer,
-			() => 6,
-			() => editor,
-			() => {},
-		);
+		const view = new FullscreenChatView({
+			transcript: [transcript],
+			dock: [editorContainer],
+			editorContainer: editorContainer,
+			terminalRows: () => 6,
+			editor: () => editor,
+			write: () => {},
+		});
 
 		view.render(12);
 		// A press away from the scrollbar is ignored by navigation but remains

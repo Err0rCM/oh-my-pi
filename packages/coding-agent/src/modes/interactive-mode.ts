@@ -4925,15 +4925,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			const rootChildren = this.#rootRuntimeChildren;
 			const dockStart = rootChildren.indexOf(this.pendingMessagesContainer);
 			if (dockStart === -1) return;
-			this.#fullscreenChatView = new FullscreenChatView(
-				rootChildren.slice(0, dockStart),
-				rootChildren.slice(dockStart),
-				this.editorContainer,
-				() => this.ui.terminal.rows,
-				() => this.editor,
-				data => this.ui.terminal.write(data),
-				() => this.ui.requestRender(),
-			);
+			this.#fullscreenChatView = new FullscreenChatView({
+				transcript: rootChildren.slice(0, dockStart),
+				dock: rootChildren.slice(dockStart),
+				editorContainer: this.editorContainer,
+				terminalRows: () => this.ui.terminal.rows,
+				editor: () => this.editor,
+				write: data => this.ui.terminal.write(data),
+				requestRender: () => this.ui.requestRender(),
+			});
 			this.#fullscreenChatInputUnsubscribe = this.ui.addInputListener(data => {
 				const focused = this.ui.getFocused();
 				if (!focused || !this.editorContainer.children.includes(focused)) return undefined;
