@@ -375,16 +375,21 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			}
 		}
 
-		// Clicking the jump-to-latest indicator row returns to the tail instead
-		// of starting a selection; the indicator only replaces the last viewport
-		// row while the user is scrolled away, so it cannot shadow real content.
-		if (event.leftClick && this.#hasJumpIndicator() && event.row === this.#viewportHeight - 1) {
+		const scrollbarColumn = this.#width - 1;
+		// Clicking the jump-to-latest indicator returns to the tail instead of
+		// starting a selection; the indicator only replaces the last viewport
+		// row while the user is scrolled away, so it cannot shadow content —
+		// but it must still leave that row's scrollbar column to the scrollbar.
+		if (
+			event.leftClick &&
+			this.#hasJumpIndicator() &&
+			event.row === this.#viewportHeight - 1 &&
+			event.col < scrollbarColumn
+		) {
 			this.#scrollView.scrollToBottom();
 			this.#syncFollowTail();
 			return true;
 		}
-
-		const scrollbarColumn = this.#width - 1;
 		if (event.leftClick && event.col === scrollbarColumn && event.row < this.#viewportHeight) {
 			this.#draggingScrollbar = true;
 			this.#draggingSelection = false;

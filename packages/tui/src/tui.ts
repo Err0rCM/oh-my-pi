@@ -700,7 +700,9 @@ export class TUI extends Container {
 	// CPR-timeout fallback in #resolveResizeAnchor).
 	#resizeBurstPull = 0;
 	/** Pending settled repaint for a resize burst while the alt screen is owned. */
-	#altResizeRenderTimer: ReturnType<typeof setTimeout> | undefined;
+	#altResizeRenderTimer: RenderTimer | undefined;
+	/** Terminal height seen by the last alt-screen resize, for grow/shrink direction. */
+	#lastAltResizeHeight = 0;
 	// Geometry epoch: bumped on every resize transaction entry, so each CSI 6n
 	// request records the geometry it was parked under.
 	#geometryEpoch = 0;
@@ -773,7 +775,6 @@ export class TUI extends Container {
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
-	static readonly #ALT_RESIZE_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
 	static readonly #RESIZE_PROBE_TIMEOUT_MS = 200;
 	#inputRenderGraceUntilMs = 0;
@@ -1186,14 +1187,23 @@ export class TUI extends Container {
 	 * bottom and would lose the editor, so they always paint.
 	 */
 	#scheduleSettledAltResizeRender(): void {
-		const shrinking = this.terminal.rows < this.#previousHeight;
+		const rows = this.terminal.rows;
+		const shrinking = rows < this.#lastAltResizeHeight;
+		this.#lastAltResizeHeight = rows;
 		const inMultiplexer = Bun.env.TMUX !== undefined || Bun.env.ZELLIJ !== undefined;
-		if (shrinking && inMultiplexer) return;
-		if (this.#altResizeRenderTimer !== undefined) clearTimeout(this.#altResizeRenderTimer);
-		this.#altResizeRenderTimer = setTimeout(() => {
+		if (shrinking && inMultiplexer) {
+			// Silence also cancels a repaint a previous grow had scheduled: the
+			// pane shrank again mid-burst, and painting at this height would be
+			// exactly the stacked full redraw this strategy avoids.
+			this.#altResizeRenderTimer?.cancel();
+			this.#altResizeRenderTimer = undefined;
+			return;
+		}
+		this.#altResizeRenderTimer?.cancel();
+		this.#altResizeRenderTimer = this.#renderScheduler.scheduleRender(() => {
 			this.#altResizeRenderTimer = undefined;
 			this.requestRender(true);
-		}, TUI.#ALT_RESIZE_SETTLE_MS);
+		}, TUI.#RESIZE_VIEWPORT_SETTLE_MS);
 	}
 
 	#beginResizeAltPaint(restartingProbe = false): void {
@@ -1663,10 +1673,8 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
-		if (this.#altResizeRenderTimer !== undefined) {
-			clearTimeout(this.#altResizeRenderTimer);
-			this.#altResizeRenderTimer = undefined;
-		}
+		this.#altResizeRenderTimer?.cancel();
+		this.#altResizeRenderTimer = undefined;
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
 		this.#resizeSettleTimer?.cancel();
@@ -2628,6 +2636,7 @@ export class TUI extends Container {
 			this.#altPreviousLines = [];
 			this.#altEnterWidth = width;
 			this.#altEnterHeight = height;
+			this.#lastAltResizeHeight = height;
 		} else if (!wantAlt && this.#altActive) {
 			const mouseExit = this.#altMouseTrackingActive ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
@@ -2638,6 +2647,8 @@ export class TUI extends Container {
 			this.#altActive = false;
 			this.#altMouseTrackingActive = false;
 			this.#altPreviousLines = [];
+			this.#altResizeRenderTimer?.cancel();
+			this.#altResizeRenderTimer = undefined;
 			// The alt-buffer restore put the pre-overlay normal screen back. If
 			// that buffer resized while covered, its cursor moved with width
 			// rewrap or a height-grow scrollback pull, while our viewport anchor

@@ -145,4 +145,59 @@ describe("alt-frame row-level diff", () => {
 		expect(viewport.length).toBe(6);
 		expect(viewport[0]).toContain("中文第一行");
 	});
+
+	it("repaints on a partial grow-back after a shrink (6→4→5)", async () => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,123,0";
+		const term = new RecordingTerminal(40, 6);
+		const tui = new TUI(term, true);
+		const overlay = new RowsComponent(["中文第一行", "second row", "editor line"]);
+
+		tui.start();
+		await flushRender(term);
+		tui.showOverlay(overlay, { anchor: "top-left", width: "100%", maxHeight: "100%", fullscreen: true, base: true });
+		tui.requestRender();
+		await flushRender(term);
+
+		// Shrink is silent (direction is judged against the last resize, not a
+		// normal-screen height frozen before the alt screen took over).
+		term.writes.length = 0;
+		term.resize(40, 4);
+		overlay.rows = ["中文第一行", "second row", "editor line"];
+		await Bun.sleep(500);
+		await flushRender(term);
+		expect(term.writes.filter(write => write.includes("中文第一行")).length).toBe(0);
+
+		// A partial grow-back still leaves blank rows: it must repaint.
+		term.resize(40, 5);
+		await Bun.sleep(500);
+		await flushRender(term);
+		expect(term.writes.filter(write => write.includes("中文第一行")).length).toBe(1);
+		const viewport = await term.flushAndGetViewport();
+		expect(viewport.length).toBe(5);
+	});
+
+	it("cancels a pending grow repaint when the burst shrinks again (6→7→5)", async () => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,123,0";
+		const term = new RecordingTerminal(40, 6);
+		const tui = new TUI(term, true);
+		const overlay = new RowsComponent(["中文第一行", "second row", "editor line"]);
+
+		tui.start();
+		await flushRender(term);
+		tui.showOverlay(overlay, { anchor: "top-left", width: "100%", maxHeight: "100%", fullscreen: true, base: true });
+		tui.requestRender();
+		await flushRender(term);
+
+		// Grow schedules a settled repaint; shrinking again within the settle
+		// window cancels it — painting at the end height would be the stacked
+		// full redraw this strategy exists to avoid.
+		term.writes.length = 0;
+		term.resize(40, 7);
+		await Bun.sleep(40);
+		term.resize(40, 5);
+		overlay.rows = ["中文第一行", "second row", "editor line"];
+		await Bun.sleep(500);
+		await flushRender(term);
+		expect(term.writes.filter(write => write.includes("中文第一行")).length).toBe(0);
+	});
 });
