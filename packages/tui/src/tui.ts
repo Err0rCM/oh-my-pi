@@ -773,7 +773,7 @@ export class TUI extends Container {
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
-	static readonly #ALT_RESIZE_SETTLE_MS = 300;
+	static readonly #ALT_RESIZE_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
 	static readonly #RESIZE_PROBE_TIMEOUT_MS = 200;
 	#inputRenderGraceUntilMs = 0;
@@ -1174,10 +1174,21 @@ export class TUI extends Container {
 	/**
 	 * While the fullscreen surface owns the alt screen, a resize repaints in
 	 * place (no borrow protocol), but a soft-keyboard animation delivers a
-	 * burst of SIGWINCHes. Each repaint re-flows rows — visible as continuous
-	 * flicker on slow clients — so paint once, after the burst settles.
+	 * burst of SIGWINCHes.
+	 *
+	 * On a height shrink under a bottom-anchored multiplexer (tmux), the pane
+	 * is re-flowed by tmux itself with the dock rows preserved: repainting on
+	 * top of that only adds a second full-screen redraw — the main flicker the
+	 * user sees on mobile. Stay silent instead and let the next keystroke or
+	 * output repaint (the row diff keeps that small). A grow leaves blank rows
+	 * at the top that only we can fill, so that direction still paints — once,
+	 * after the burst settles. Direct terminals (no multiplexer) crop from the
+	 * bottom and would lose the editor, so they always paint.
 	 */
 	#scheduleSettledAltResizeRender(): void {
+		const shrinking = this.terminal.rows < this.#previousHeight;
+		const inMultiplexer = Bun.env.TMUX !== undefined || Bun.env.ZELLIJ !== undefined;
+		if (shrinking && inMultiplexer) return;
 		if (this.#altResizeRenderTimer !== undefined) clearTimeout(this.#altResizeRenderTimer);
 		this.#altResizeRenderTimer = setTimeout(() => {
 			this.#altResizeRenderTimer = undefined;

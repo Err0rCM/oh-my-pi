@@ -42,6 +42,7 @@ describe("alt-frame row-level diff", () => {
 	beforeEach(() => {
 		delete Bun.env.TERM_PROGRAM;
 		delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
+		delete Bun.env.TMUX;
 	});
 
 	it("repaints only the changed row on a keystroke-sized frame", async () => {
@@ -109,5 +110,39 @@ describe("alt-frame row-level diff", () => {
 		expect(viewport.length).toBe(4);
 		expect(viewport[0]).toContain("中文第一行");
 		expect(viewport[3]).toContain("editor line");
+	});
+
+	it("stays silent on a shrink under tmux and paints once on the grow-back", async () => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,123,0";
+		const term = new RecordingTerminal(40, 6);
+		const tui = new TUI(term, true);
+		const overlay = new RowsComponent(["中文第一行", "second row", "editor line"]);
+
+		tui.start();
+		await flushRender(term);
+		tui.showOverlay(overlay, { anchor: "top-left", width: "100%", maxHeight: "100%", fullscreen: true, base: true });
+		tui.requestRender();
+		await flushRender(term);
+
+		// Soft keyboard opens (6 → 4): tmux re-flows the pane itself; painting
+		// here would stack a second full repaint on top of tmux's — the flicker.
+		term.writes.length = 0;
+		term.resize(40, 5);
+		await Bun.sleep(40);
+		term.resize(40, 4);
+		overlay.rows = ["中文第一行", "second row", "editor line"];
+		await Bun.sleep(500);
+		await flushRender(term);
+		expect(term.writes.filter(write => write.includes("中文第一行")).length).toBe(0);
+
+		// Keyboard closes (4 → 6): the blank rows on top need us; one settled
+		// repaint fills them.
+		term.resize(40, 6);
+		await Bun.sleep(500);
+		await flushRender(term);
+		expect(term.writes.filter(write => write.includes("中文第一行")).length).toBe(1);
+		const viewport = await term.flushAndGetViewport();
+		expect(viewport.length).toBe(6);
+		expect(viewport[0]).toContain("中文第一行");
 	});
 });
