@@ -80,4 +80,34 @@ describe("alt-frame row-level diff", () => {
 		await flushRender(term);
 		expect(term.writes.join("")).toMatch(/^(\x1b\[\?25l)?$/);
 	});
+
+	it("merges a soft-keyboard resize burst into one settled repaint", async () => {
+		const term = new RecordingTerminal(40, 6);
+		const tui = new TUI(term, true);
+		const overlay = new RowsComponent(["中文第一行", "second row", "third row", "editor line"]);
+
+		tui.start();
+		await flushRender(term);
+		tui.showOverlay(overlay, { anchor: "top-left", width: "100%", maxHeight: "100%", fullscreen: true, base: true });
+		tui.requestRender();
+		await flushRender(term);
+
+		// The soft-keyboard animation delivers a burst of SIGWINCHes (6→5→4).
+		// Each one reschedules the settled repaint, so the reflowed frame is
+		// painted once at the end instead of flashing per resize step.
+		term.writes.length = 0;
+		term.resize(40, 5);
+		await Bun.sleep(40);
+		term.resize(40, 4);
+		overlay.rows = ["中文第一行", "second row", "third row", "editor line"];
+		await Bun.sleep(300);
+		await flushRender(term);
+
+		const repaints = term.writes.filter(write => write.includes("中文第一行"));
+		expect(repaints.length).toBe(1);
+		const viewport = await term.flushAndGetViewport();
+		expect(viewport.length).toBe(4);
+		expect(viewport[0]).toContain("中文第一行");
+		expect(viewport[3]).toContain("editor line");
+	});
 });

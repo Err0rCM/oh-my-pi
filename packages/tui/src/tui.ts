@@ -699,6 +699,8 @@ export class TUI extends Container {
 	// shrink-then-regrow that never exceeds the pre-burst height (see the
 	// CPR-timeout fallback in #resolveResizeAnchor).
 	#resizeBurstPull = 0;
+	/** Pending settled repaint for a resize burst while the alt screen is owned. */
+	#altResizeRenderTimer: ReturnType<typeof setTimeout> | undefined;
 	// Geometry epoch: bumped on every resize transaction entry, so each CSI 6n
 	// request records the geometry it was parked under.
 	#geometryEpoch = 0;
@@ -771,6 +773,7 @@ export class TUI extends Container {
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
+	static readonly #ALT_RESIZE_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
 	static readonly #RESIZE_PROBE_TIMEOUT_MS = 200;
 	#inputRenderGraceUntilMs = 0;
@@ -1168,9 +1171,23 @@ export class TUI extends Container {
 	 * was already stashed and emptied, so the snapshot below must be skipped
 	 * to keep the good stash.
 	 */
+	/**
+	 * While the fullscreen surface owns the alt screen, a resize repaints in
+	 * place (no borrow protocol), but a soft-keyboard animation delivers a
+	 * burst of SIGWINCHes. Each repaint re-flows rows — visible as continuous
+	 * flicker on slow clients — so paint once, after the burst settles.
+	 */
+	#scheduleSettledAltResizeRender(): void {
+		if (this.#altResizeRenderTimer !== undefined) clearTimeout(this.#altResizeRenderTimer);
+		this.#altResizeRenderTimer = setTimeout(() => {
+			this.#altResizeRenderTimer = undefined;
+			this.requestRender(true);
+		}, TUI.#ALT_RESIZE_SETTLE_MS);
+	}
+
 	#beginResizeAltPaint(restartingProbe = false): void {
 		if (this.#altActive) {
-			this.requestRender(true);
+			this.#scheduleSettledAltResizeRender();
 			return;
 		}
 		const burstLastHeight = this.#resizeBurstLastHeight ?? this.#previousHeight;
@@ -1635,6 +1652,10 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		if (this.#altResizeRenderTimer !== undefined) {
+			clearTimeout(this.#altResizeRenderTimer);
+			this.#altResizeRenderTimer = undefined;
+		}
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
 		this.#resizeSettleTimer?.cancel();
@@ -3003,7 +3024,10 @@ export class TUI extends Container {
 			}
 		}
 		let buffer = `${this.#paintBeginSequence}\x1b[H`;
-		const rowDiff = !force && this.#altPreviousLines.length === height;
+		// No length gate: a height-only resize (a soft keyboard shrinking the
+		// window) keeps every row's content, so the diff skips them and only
+		// the rows appearing or disappearing at the edge get repainted.
+		const rowDiff = !force && this.#altPreviousLines.length > 0;
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\r\n";
 			// Row-level diff: an identical row keeps its pixels without any
