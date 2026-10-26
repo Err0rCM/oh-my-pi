@@ -3003,8 +3003,16 @@ export class TUI extends Container {
 			}
 		}
 		let buffer = `${this.#paintBeginSequence}\x1b[H`;
+		const rowDiff = !force && this.#altPreviousLines.length === height;
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\r\n";
+			// Row-level diff: an identical row keeps its pixels without any
+			// rewrite. Rows re-erase before repainting, so rewriting unchanged
+			// rows (every keystroke repaints the whole frame otherwise) is
+			// visible as flicker on slow clients — mobile terminals over SSH,
+			// especially where a multiplexer strips the synchronized-output
+			// bracketing.
+			if (rowDiff && this.#altPreviousLines[r] === fitted[r]) continue;
 			buffer += this.#lineRewriteSequence(fitted[r], width, r, -1, -1, this.#osc66SpacerGlyphWidth(fitted, r));
 		}
 		buffer += this.#altCursorSequence(markers?.[0], width, height);
