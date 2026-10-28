@@ -360,6 +360,11 @@ export class VirtualTerminal implements Terminal {
 		return { row: cursor.y, col: cursor.x };
 	}
 
+	/** Whether the hardware cursor is currently shown (`\x1b[?25h`). */
+	cursorIsVisible(): boolean {
+		return this.#term.cursor.visible;
+	}
+
 	/**
 	 * Kitty-graphics placements the engine currently tracks on the active
 	 * screen (positions only; pixels are host-side). The engine keeps main and

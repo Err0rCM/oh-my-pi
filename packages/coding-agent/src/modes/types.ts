@@ -338,6 +338,8 @@ export interface InteractiveModeContext {
 		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
 	): void;
 	getEditorComponent(): ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined;
+	/** Toggle the persistent alternate-screen chat layout. */
+	setFullscreenTui(enabled: boolean): void;
 
 	// UI helpers
 	/**

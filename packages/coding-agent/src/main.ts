@@ -182,6 +182,7 @@ import {
 	cfgThemeDark,
 	cfgThemeLight,
 	cfgTuiCompleteScrollback,
+	cfgTuiFullscreen,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
@@ -1967,6 +1968,10 @@ export async function runRootCommand(
 		// Runtime overrides (not persisted): the session's cost gate reads its thresholds from settings.
 		if (parsedArgs.warnCost !== undefined) cfgSessionWarnCost.override(settingsInstance, parsedArgs.warnCost);
 		if (parsedArgs.maxCost !== undefined) cfgSessionMaxCost.override(settingsInstance, parsedArgs.maxCost);
+		if (parsedArgs.tuiMode) {
+			// --tui-mode affects only this process; /settings remains the persistent preference.
+			cfgTuiFullscreen.override(settingsInstance, parsedArgs.tuiMode === "fullscreen");
+		}
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyProtocolDefaults("rpc", settingsInstance);
 		} else if (parsedArgs.mode === "acp") {

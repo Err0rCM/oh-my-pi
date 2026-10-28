@@ -499,6 +499,12 @@ export interface OverlayOptions {
 	 */
 	fullscreen?: boolean;
 	/**
+	 * Keep this overlay below ordinary dialogs and menus. Used by persistent
+	 * application surfaces that own the alternate screen without behaving like a
+	 * modal; normal overlays continue to receive focus and input above it.
+	 */
+	base?: boolean;
+	/**
 	 * Enable terminal mouse reporting while fullscreen. Defaults on; disable it
 	 * when native terminal text selection takes precedence over pointer events.
 	 */
@@ -692,8 +698,14 @@ interface LineClassification {
 // terminal dispatch one SGR instead of several. On a real transcript ~40% of
 // all SGR sequences are collapsible this way, which meaningfully cuts the
 // per-frame byte volume and SGR-dispatch count a slow (xterm.js/WebGL) terminal
-// must process. On by default; `PI_NO_SGR_COALESCE=1` disables it.
-const SGR_COALESCE_ENABLED = !$flag("PI_NO_SGR_COALESCE");
+// must process. On by default; `PI_NO_SGR_COALESCE=1` disables it. Disabled
+// under tmux: its DEC 2026 synchronized-output handling drops reverse-video
+// and other attributes from merged SGR parameter runs, so the byte savings
+// turn into lost styling (observed with the fullscreen selection highlight).
+/** Runtime check (not a module constant) so tests can pin the behavior regardless of the host shell. */
+function sgrCoalesceEnabled(): boolean {
+	return !$flag("PI_NO_SGR_COALESCE") && !Bun.env.TMUX;
+}
 const CC_ESC = 0x1b;
 const CC_KITTY_PLACEHOLDER_HIGH = KITTY_PLACEHOLDER.charCodeAt(0);
 const CC_BRACKET = 0x5b; // [
@@ -751,7 +763,7 @@ function endsWithIncompleteExtendedColor(line: string, start: number, end: numbe
  * that need normalization within an adjacent run.
  */
 export function coalesceAdjacentSgr(line: string): string {
-	if (!SGR_COALESCE_ENABLED) return line;
+	if (!sgrCoalesceEnabled() || line.indexOf("\x1b[") === -1) return line;
 	const n = line.length;
 	let out = "";
 	let copiedUpto = 0;
@@ -879,6 +891,10 @@ export class TUI extends Container {
 	// A shrink can discard live rows below the cursor and push others into
 	// scrollback. Rebuild must repair that even when the burst ends taller.
 	#resizeBurstShrank = false;
+	/** Pending settled repaint for a resize burst while the alt screen is owned. */
+	#altResizeRenderTimer: RenderTimer | undefined;
+	/** Terminal height seen by the last alt-screen resize, for grow/shrink direction. */
+	#lastAltResizeHeight = 0;
 	// Geometry epoch: bumped on every resize transaction entry, so each CSI 6n
 	// request records the geometry it was parked under.
 	#geometryEpoch = 0;
@@ -1307,9 +1323,10 @@ export class TUI extends Container {
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
 		component.setIgnoreTight?.(true);
 		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, released: false };
-		this.overlayStack.push(entry);
+		if (options?.base) this.overlayStack.unshift(entry);
+		else this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
-		if (this.#isOverlayVisible(entry)) {
+		if (this.#isOverlayVisible(entry) && this.#getTopmostVisibleOverlay() === entry) {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
@@ -1324,7 +1341,7 @@ export class TUI extends Container {
 					this.overlayStack.splice(index, 1);
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
+						this.#restoreOverlayFocus(entry);
 					}
 					if (this.overlayStack.length === 0) {
 						this.terminal.hideCursor();
@@ -1340,7 +1357,7 @@ export class TUI extends Container {
 				if (hidden) {
 					// If this overlay or one of its owned targets had focus, move focus to the next one holding keys or preFocus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
-						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
+						this.#restoreOverlayFocus(entry);
 					}
 				} else {
 					// Restore focus to this overlay when showing (if it's actually visible)
@@ -1358,8 +1375,8 @@ export class TUI extends Container {
 	hideOverlay(): void {
 		const overlay = this.overlayStack.pop();
 		if (!overlay) return;
-		// Find the topmost visible overlay holding keys, or fall back to preFocus
-		this.setFocus(this.#getKeyHolderOverlay()?.component ?? overlay.preFocus);
+		// Find topmost visible overlay, or fall back to preFocus
+		this.#restoreOverlayFocus(overlay);
 		if (this.overlayStack.length === 0) {
 			this.terminal.hideCursor();
 			this.#recordHardwareCursorHidden();
@@ -1369,7 +1386,7 @@ export class TUI extends Container {
 
 	/** Check if there are any visible overlays */
 	hasOverlay(): boolean {
-		return this.overlayStack.some(o => this.#isOverlayVisible(o));
+		return this.overlayStack.some(o => this.#isOverlayVisible(o) && o.options?.base !== true);
 	}
 
 	/**
@@ -1491,6 +1508,16 @@ export class TUI extends Container {
 		if (!field || field === this.#focusedComponent || !visible.every(entry => sheet(entry.component))) return;
 		for (const entry of visible) entry.released = true;
 		this.setFocus(field);
+	}
+
+	/** Restore focus after a modal leaves without stealing an owned base surface's editor. */
+	#restoreOverlayFocus(entry: (typeof this.overlayStack)[number]): void {
+		const topVisible = this.#getTopmostVisibleOverlay();
+		if (topVisible?.options?.base && isOverlayFocusTarget(topVisible.component, entry.preFocus)) {
+			this.setFocus(entry.preFocus);
+			return;
+		}
+		this.setFocus(topVisible?.component ?? entry.preFocus);
 	}
 
 	override invalidate(): void {
@@ -2017,6 +2044,40 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * While the fullscreen surface owns the alt screen, a resize repaints in
+	 * place (no borrow protocol), but a soft-keyboard animation delivers a
+	 * burst of SIGWINCHes.
+	 *
+	 * On a height shrink under a bottom-anchored multiplexer (tmux), the pane
+	 * is re-flowed by tmux itself with the dock rows preserved: repainting on
+	 * top of that only adds a second full-screen redraw — the main flicker the
+	 * user sees on mobile. Stay silent instead and let the next keystroke or
+	 * output repaint (the row diff keeps that small). A grow leaves blank rows
+	 * at the top that only we can fill, so that direction still paints — once,
+	 * after the burst settles. Direct terminals (no multiplexer) crop from the
+	 * bottom and would lose the editor, so they always paint.
+	 */
+	#scheduleSettledAltResizeRender(): void {
+		const rows = this.terminal.rows;
+		const shrinking = rows < this.#lastAltResizeHeight;
+		this.#lastAltResizeHeight = rows;
+		const inMultiplexer = Bun.env.TMUX !== undefined || Bun.env.ZELLIJ !== undefined;
+		if (shrinking && inMultiplexer) {
+			// Silence also cancels a repaint a previous grow had scheduled: the
+			// pane shrank again mid-burst, and painting at this height would be
+			// exactly the stacked full redraw this strategy avoids.
+			this.#altResizeRenderTimer?.cancel();
+			this.#altResizeRenderTimer = undefined;
+			return;
+		}
+		this.#altResizeRenderTimer?.cancel();
+		this.#altResizeRenderTimer = this.#renderScheduler.scheduleRender(() => {
+			this.#altResizeRenderTimer = undefined;
+			this.requestRender(true);
+		}, TUI.#RESIZE_VIEWPORT_SETTLE_MS);
+	}
+
+	/**
 	 * Borrow the alternate buffer for stable, history-free resize repainting.
 	 * `restartingProbe` marks a transaction restarted by a SIGWINCH that
 	 * arrived while the settled anchor probe was in flight: the live window
@@ -2025,7 +2086,7 @@ export class TUI extends Container {
 	 */
 	#beginResizeAltPaint(restartingProbe = false): void {
 		if (this.#altActive) {
-			this.requestRender(true);
+			this.#scheduleSettledAltResizeRender();
 			return;
 		}
 		this.#trackResizeBurst();
@@ -3916,6 +3977,7 @@ export class TUI extends Container {
 			this.#altPreparedRows = [];
 			this.#altEnterWidth = width;
 			this.#altEnterHeight = height;
+			this.#lastAltResizeHeight = height;
 		} else if (!wantAlt && this.#altActive) {
 			// Leaving reporting on when the normal buffer wants it restores
 			// inline capture the same frame the overlay closes: no later paint
@@ -4625,5 +4687,30 @@ export class TUI extends Container {
 		// which stop() and a late native-surface handshake use after the restore.
 		if (target) this.#hardwareCursorState = target;
 		else this.#recordHardwareCursorHidden();
+	}
+
+	/** Clamp an alt-frame caret marker through the shared cursor-state policy (col also capped to the frame width). */
+	#altCursorTarget(
+		marker: { row: number; col: number } | undefined,
+		width: number,
+		height: number,
+	): HardwareCursorState | null {
+		if (marker === undefined) return null;
+		return this.#targetHardwareCursorState(
+			{ row: marker.row, col: Math.min(marker.col, Math.max(0, width - 1)) },
+			height,
+		);
+	}
+
+	/**
+	 * Cursor parking sequence for an alt frame. With a marker: clamp through
+	 * #altCursorTarget (honoring the hardware-cursor preference, like the
+	 * normal-screen path) and position, showing only when that preference
+	 * allows. Without a marker: hide, so the cursor never lingers visible at a
+	 * stale position after the focused editor disappeared from the frame.
+	 */
+	#altCursorSequence(target: HardwareCursorState | null): string {
+		if (target === null) return "\x1b[?25l";
+		return `\x1b[${target.row + 1};${target.col + 1}H${target.visible ? "\x1b[?25h" : "\x1b[?25l"}`;
 	}
 }

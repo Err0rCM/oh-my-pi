@@ -711,12 +711,7 @@ export class SelectorController {
 	 * which config reloads and parent-session writes must not do. Every other
 	 * setting applies through handle listeners owned by the session and InteractiveMode.
 	 */
-	handleSettingChange(id: string, value: unknown): void {
-		if (id !== cfgDefaultThinkingLevel.id || typeof value !== "string") return;
-		const level = parseConfiguredThinkingLevel(value);
-		if (level === undefined || level === this.ctx.session.configuredThinkingLevel()) return;
-		this.ctx.session.setThinkingLevel(level);
-	}
+	handleSettingChange(id: string, value: unknown): void {}
 
 	/**
 	 * Open a model selector. A focused subagent always gets the session-only

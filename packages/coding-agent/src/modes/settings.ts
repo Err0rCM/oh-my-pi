@@ -453,6 +453,19 @@ export const cfgTuiRenderMermaid = register({
 	},
 });
 
+export const cfgTuiFullscreen = register({
+	id: "tui.fullscreen",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen TUI",
+		description:
+			"Use an alternate-screen chat view with an independently scrollable transcript, scrollbar, and fixed editor/status dock",
+	},
+});
+
 export const cfgTuiRenderSvg = register({
 	id: "tui.renderSvg",
 	type: "boolean",

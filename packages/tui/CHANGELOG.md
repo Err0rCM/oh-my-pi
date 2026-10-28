@@ -1177,6 +1177,20 @@
 ### Fixed
 
 - Fixed inline color swatches appearing for words with hex-like prefixes, such as `#each`; swatches now appear only when the entire word is a valid color.
+- Fullscreen alt frames now park the hardware cursor on a focused editor's caret marker (previously discarded, leaving the composer with no visible cursor for the whole session), reposition on caret-only moves through the identical-frame skip path, respect the Show Hardware Cursor preference, and re-hide when a frame carries no marker.
+- ScrollView scrollbar glyphs are bracketed with SGR resets so a row ending mid-sequence (e.g. an italic thinking block) can no longer bleed its styling into the scrollbar column.
+
+### Added
+
+- `Editor.moveCursorToRenderedPosition` + `MouseRoutable` routing: hosts can translate a pointer click on rendered editor rows into a caret move (word-wrap aware, surrogate-pair safe, clamped to EOL).
+- `WheelScrollAccelerator`: speed-adaptive wheel scrolling for full-screen surfaces — a fling's dense event stream scales from 1 to 6 lines per event (sub-5ms bursts count as one notch), with `ALT_WHEEL_SCROLL_MULTIPLIER` for a jump. Timings mirror upstream Pi.
+- `colToCodeUnitIndex`: shared visible-column → UTF-16 code-unit mapping by grapheme walk (wide glyphs stop before the glyph, zero-width contribute no cells).
+
+### Changed
+
+- Fullscreen alt frames repaint per-row diffs: rows identical to the previous frame emit nothing, so a keystroke no longer rewrites the whole screen (visible as flicker on slow clients).
+- Fullscreen resizes under a multiplexer no longer repaint on a height shrink — tmux re-flows the pane bottom-anchored itself and a repaint would stack a second full-screen redraw (the mobile soft-keyboard flicker); a grow repaints once after the burst settles. Direct terminals always repaint.
+- SGR coalescing is disabled while running under tmux, whose synchronized-output handling drops reverse-video attributes from merged sequences.
 
 ## [18.0.10] - 2026-08-28
 
@@ -1400,6 +1414,9 @@
 
 - Fixed an issue where repeated pane-width adjustments or terminal resizing could corrupt native scrollback and soft-wrap behavior.
 - Fixed an issue where scaled OSC 66 Markdown headings (such as "Large Headings" on Kitty) would render as invisible placeholders or get partially cleared after a redraw or terminal resize.
+### Added
+
+- Added base fullscreen overlays, which keep an alternate-screen application surface below ordinary dialogs and menus without stealing their focus.
 
 ## [17.2.13] - 2026-08-11
 
